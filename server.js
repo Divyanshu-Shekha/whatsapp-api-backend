@@ -14,7 +14,7 @@ const PORT = 5000;
 const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this to your PHP API URL
 
 app.use(cors({
-    origin: 'https://imw-edu.com/whatsapp-api-frontend/',
+    origin: 'https://imw-edu.com',
     credentials: true
 }));
 app.use(express.json());
