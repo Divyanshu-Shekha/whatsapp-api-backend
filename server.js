@@ -666,6 +666,53 @@ async function safeDeleteAuthFolder(authPath, maxRetries = 5, delay = 1000) {
 }
 
 
+// Add this simple health check endpoint anywhere in your code
+// I recommend placing it right after the app initialization (around line 20)
+// or at the end before app.listen()
+
+// ============================================
+// HEALTH CHECK ENDPOINT
+// ============================================
+
+// Simple health check - no authentication required
+app.get('/api/health', (req, res) => {
+    res.status(200).json({ 
+        status: 'ok',
+        message: 'Server is running',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
+// Detailed health check - includes database connection status
+app.get('/api/health/detailed', async (req, res) => {
+    let dbStatus = 'disconnected';
+    let dbError = null;
+
+    try {
+        const connection = await pool.getConnection();
+        await connection.ping();
+        connection.release();
+        dbStatus = 'connected';
+    } catch (error) {
+        dbError = error.message;
+    }
+
+    res.status(200).json({
+        status: dbStatus === 'connected' ? 'healthy' : 'degraded',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        services: {
+            server: 'running',
+            database: dbStatus,
+            activeClients: clients.size,
+            qrCodesGenerated: qrCodes.size
+        },
+        error: dbError
+    });
+});
+
+
 // ============================================
 // AUTH ROUTES
 // ============================================
