@@ -13,9 +13,12 @@ const PORT = 5000;
 // PHP API Configuration
 const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this to your PHP API URL
 
+// In your Node.js backend (replace the current CORS config)
 app.use(cors({
-    origin: 'https://imw-edu.com/whatsapp-api-frontend/',
-    credentials: true
+    origin: ['https://imw-edu.com', 'http://localhost:3000', 'https://imw-edu.com/whatsapp-api-frontend'],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
@@ -63,12 +66,16 @@ async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
     }
 }
 
-// Middleware: Extract token from request
+// Fix the extractToken function
 function extractToken(req) {
-    return req.headers['authorization']?.replace('Bearer ', '') || req.session?.token;
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        return authHeader.substring(7); // Remove 'Bearer ' prefix
+    }
+    return null;
 }
 
-// Middleware: Verify authentication via PHP API
+// Update the verifyAuth middleware to handle missing tokens better
 async function verifyAuth(req, res, next) {
     const token = extractToken(req);
     
@@ -79,13 +86,25 @@ async function verifyAuth(req, res, next) {
     try {
         // Verify token by calling PHP API
         const userData = await callPHPAPI('/auth/me', 'GET', null, token);
+        if (!userData || !userData.user) {
+            return res.status(401).json({ error: 'Invalid user data' });
+        }
         req.userId = userData.user.id;
         req.token = token;
         next();
     } catch (error) {
+        console.error('Auth verification failed:', error.message);
         return res.status(401).json({ error: 'Invalid token' });
     }
 }
+
+
+// Add this before your routes for debugging
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+    console.log('Headers:', req.headers);
+    next();
+});
 
 // ============================================
 // HEALTH CHECK
