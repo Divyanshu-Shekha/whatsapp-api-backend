@@ -152,18 +152,17 @@ app.post('/api/auth/validate-token', async (req, res) => {
 // Store token in database after login
 app.post('/api/auth/store-token', verifyAuth, async (req, res) => {
     try {
-        const { token, deviceInfo } = req.body;
+        const { deviceInfo } = req.body;
         
-        if (!token) {
-            return res.status(400).json({ error: 'Token is required' });
-        }
-
+        // Don't send token in body - use the authenticated token
         const result = await callPHPAPI('/auth/token/store', 'POST', { 
-            token, 
             device_info: deviceInfo || 'Web Browser' 
+            // Remove token from body - PHP will use the token from Authorization header
         }, req.token);
+        
         res.json(result);
     } catch (error) {
+        console.error('Error storing token:', error.message);
         res.status(500).json({ error: error.message });
     }
 });
