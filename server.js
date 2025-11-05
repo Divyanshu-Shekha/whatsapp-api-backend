@@ -49,7 +49,9 @@ async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
         const config = {
             method,
             url: `${PHP_API_URL}${endpoint}`,
-            headers: {}
+            headers: {
+                'Content-Type': 'application/json'
+            }
         };
 
         if (token) {
@@ -63,8 +65,12 @@ async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
         const response = await axios(config);
         return response.data;
     } catch (error) {
+        // Forward the exact error from PHP
         if (error.response) {
-            throw new Error(error.response.data.error || 'API request failed');
+            // Forward the status code and message from PHP
+            const phpError = new Error(error.response.data.error || `PHP API error: ${error.response.status}`);
+            phpError.status = error.response.status;
+            throw phpError;
         }
         throw error;
     }
@@ -388,6 +394,7 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
 });
 
 // Get WhatsApp Status
+// Get WhatsApp Status
 app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
     try {
         const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
@@ -399,6 +406,13 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
             clientActive: isClientActive
         });
     } catch (error) {
+        console.error('Status check error:', error.message);
+        
+        // Handle 401 errors from PHP API
+        if (error.message.includes('401') || error.message.includes('Invalid token') || error.message.includes('Unauthorized')) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        
         res.status(500).json({ error: error.message });
     }
 });
