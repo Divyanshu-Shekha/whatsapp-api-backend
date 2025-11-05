@@ -15,10 +15,15 @@ const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this t
 
 // In your Node.js backend (replace the current CORS config)
 app.use(cors({
+<<<<<<< HEAD
     origin: ['https://imw-edu.com', 'http://localhost:3000', 'https://imw-edu.com/whatsapp-api-frontend'],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+=======
+    origin: 'https://imw-edu.com',
+    credentials: true
+>>>>>>> 0c0b6b3de12cc10ba1fe3a20a8e203a58be427a6
 }));
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
