@@ -11,7 +11,9 @@ const app = express();
 const PORT = 5000;
 
 // PHP API Configuration
-const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this to your PHP API URL
+// const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this to your PHP API URL
+const PHP_API_URL = 'http://localhost/whatsapp-api/api.php'; // Adjust this to your PHP API URL
+
 
 // In your Node.js backend (replace the current CORS config)
 app.use(cors({
@@ -19,7 +21,7 @@ app.use(cors({
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    origin: 'https://imw-edu.com',
+    origin: 'http://localhost:3000',
     credentials: true
 }));
 app.use(express.json());
@@ -126,6 +128,61 @@ app.get('/api/health', (req, res) => {
 // ============================================
 // WHATSAPP CLIENT INITIALIZATION
 // ============================================
+
+// ============================================
+// TOKEN VALIDATION ROUTES
+// ============================================
+
+// Validate token from database
+app.post('/api/auth/validate-token', async (req, res) => {
+    try {
+        const { token } = req.body;
+        
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
+
+        const result = await callPHPAPI('/auth/token/validate', 'POST', { token });
+        res.json(result);
+    } catch (error) {
+        res.status(401).json({ error: error.message });
+    }
+});
+
+// Store token in database after login
+app.post('/api/auth/store-token', verifyAuth, async (req, res) => {
+    try {
+        const { token, deviceInfo } = req.body;
+        
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
+
+        const result = await callPHPAPI('/auth/token/store', 'POST', { 
+            token, 
+            device_info: deviceInfo || 'Web Browser' 
+        }, req.token);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Remove token from database (logout)
+app.post('/api/auth/remove-token', verifyAuth, async (req, res) => {
+    try {
+        const { token } = req.body;
+        
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
+
+        const result = await callPHPAPI('/auth/token/remove', 'POST', { token }, req.token);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 async function initializeClientForUser(userId, token) {
     if (clients.has(userId)) {
