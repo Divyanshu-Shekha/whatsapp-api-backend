@@ -11,8 +11,8 @@ const app = express();
 const PORT = 5000;
 
 // PHP API Configuration
-// const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this to your PHP API URL
-const PHP_API_URL = 'http://localhost/whatsapp-api/api.php'; // Adjust this to your PHP API URL
+const PHP_API_URL = 'https://imw-edu.com/whatsapp-api/api.php'; // Adjust this to your PHP API URL
+// const PHP_API_URL = 'http://localhost/whatsapp-api/api.php'; // Adjust this to your PHP API URL
 
 
 // In your Node.js backend (replace the current CORS config)
