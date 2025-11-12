@@ -113,7 +113,6 @@ async function verifyAuth(req, res, next) {
         console.error('❌ JWT Auth verification failed:', error.message);
         console.error('   Error details:', error.response?.data || error.message);
         
-        // Check if it's a token signature error specifically
         if (error.message.includes('signature') || error.message.includes('Invalid token')) {
             return res.status(401).json({ 
                 error: 'Invalid token signature',
@@ -125,7 +124,7 @@ async function verifyAuth(req, res, next) {
     }
 }
 
-// NEW: Middleware to verify API tokens (for external API calls)
+// Middleware to verify API tokens (for external API calls)
 async function verifyApiToken(req, res, next) {
     const token = extractToken(req);
     
@@ -171,7 +170,7 @@ async function verifyApiToken(req, res, next) {
     }
 }
 
-// NEW: Combined middleware - accepts both JWT and API tokens
+// Combined middleware - accepts both JWT and API tokens
 async function verifyAnyToken(req, res, next) {
     const token = extractToken(req);
     
@@ -179,10 +178,6 @@ async function verifyAnyToken(req, res, next) {
         return res.status(401).json({ error: 'Authentication token required' });
     }
 
-    // Check token length to determine type
-    // JWT tokens are much longer (3 parts separated by dots)
-    // API tokens are typically 64 characters (sha256 hash)
-    
     const isJWT = token.includes('.') && token.split('.').length === 3;
     
     if (isJWT) {
@@ -288,7 +283,7 @@ async function safeDeleteAuthFolder(authPath, maxRetries = 5, delay = 1000) {
     return false;
 }
 
-// Helper to check if auth folder exists and has valid session
+// Helper to check if auth folder exists
 function hasValidAuthSession(userId) {
     const authPath = path.join('./auth_data', `session-user-${userId}`);
     return fs.existsSync(authPath);
@@ -305,10 +300,8 @@ async function cleanStaleAuthData(userId) {
 
 // Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
-    // Prevent multiple initializations
     if (clientInitializing.get(userId)) {
         console.log(`⏳ Client already initializing for user ${userId}, waiting...`);
-        // Wait for existing initialization to complete
         let attempts = 0;
         while (clientInitializing.get(userId) && attempts < 30) {
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -320,12 +313,10 @@ async function initializeClientForUser(userId, token, forceNew = false) {
     clientInitializing.set(userId, true);
     console.log(`🔄 Starting client initialization for user ${userId} (forceNew: ${forceNew})`);
 
-    // ALWAYS clean auth data when forceNew is true
     if (forceNew) {
         console.log(`🧹 Force cleaning auth data for user ${userId}`);
         await cleanStaleAuthData(userId);
         
-        // Double-check it's really gone
         await new Promise(resolve => setTimeout(resolve, 500));
         const authPath = path.join('./auth_data', `session-user-${userId}`);
         if (fs.existsSync(authPath)) {
@@ -429,7 +420,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                     to_number: myInfo.wid.user,
                     to_name: myInfo.pushname,
                     message_body: message.body || null,
-                    has_media: hasMedia,
+                    has_media: hasMedia ? 1 : 0,
                     media_type: mediaType,
                     media_url: mediaUrl,
                     status: 'received',
@@ -454,7 +445,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
                 console.log(`🧹 Session data cleared for user ${userId} after disconnect`);
 
-                // Clean auth data after disconnect
                 setTimeout(async () => {
                     await cleanStaleAuthData(userId);
                 }, 3000);
@@ -469,7 +459,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             clientInitializing.delete(userId);
             qrCodes.delete(userId);
             
-            // Clean auth data on auth failure
             await cleanStaleAuthData(userId);
         });
 
@@ -480,31 +469,25 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
         await client.initialize();
         
-        // Wait up to 15 seconds for QR generation or authentication
         let waitTime = 0;
         while (waitTime < 15000 && !qrGenerated && !authenticated) {
             await new Promise(resolve => setTimeout(resolve, 500));
             waitTime += 500;
         }
         
-        // Check final state
         try {
             const state = await client.getState();
             console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
             
-            // If connected without QR (used old session) and forceNew was requested, this is wrong
             if (state === 'CONNECTED' && !qrGenerated && forceNew) {
-                console.error(`❌ ERROR: Client connected without QR despite forceNew! This should not happen.`);
-                console.log(`🔄 Destroying and retrying...`);
+                console.error(`❌ ERROR: Client connected without QR despite forceNew! Retrying...`);
                 
                 await client.destroy();
                 await cleanStaleAuthData(userId);
                 clientInitializing.delete(userId);
                 
-                // Wait before retry
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 
-                // Retry with even more aggressive cleanup
                 const authPath = path.join('./auth_data', `session-user-${userId}`);
                 if (fs.existsSync(authPath)) {
                     const parentDir = path.join('./auth_data');
@@ -516,7 +499,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                     });
                 }
                 
-                // One more try
                 return await initializeClientForUser(userId, token, forceNew);
             }
             
@@ -546,7 +528,6 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
     try {
         console.log(`📱 Initialize request for user ${req.userId}`);
         
-        // ALWAYS destroy existing client first to force fresh connection
         if (clients.has(req.userId)) {
             const client = clients.get(req.userId);
             console.log(`🧹 Destroying existing client for user ${req.userId} to force fresh connection`);
@@ -558,11 +539,9 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             clients.delete(req.userId);
         }
 
-        // Clean any QR codes
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
 
-        // Check database session and clean it
         try {
             const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
             if (session?.is_active) {
@@ -573,14 +552,11 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             console.log(`No database session to clean for user ${req.userId}`);
         }
 
-        // ALWAYS clean auth data to force QR generation
         console.log(`🧹 Cleaning auth data for user ${req.userId} to force QR generation`);
         await cleanStaleAuthData(req.userId);
 
-        // Wait a moment for cleanup to complete
         await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // Now initialize fresh client
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
         await initializeClientForUser(req.userId, req.token, true);
         
@@ -598,7 +574,6 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
         
-        // Check actual client state
         if (client) {
             try {
                 const state = await client.getState();
@@ -655,7 +630,6 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
             // Session doesn't exist, that's ok
         }
         
-        // If DB says connected but client isn't, clean up DB
         if (session?.is_active && !isConnected) {
             console.log(`🧹 Cleaning stale DB session for user ${req.userId}`);
             try {
@@ -717,7 +691,6 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
 
         console.log(`✓ WhatsApp disconnected for user ${req.userId}`);
         
-        // Clean auth data immediately
         await cleanStaleAuthData(req.userId);
         
         res.json({ 
@@ -731,12 +704,11 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
     }
 });
 
-// Manual cleanup endpoint - IMPORTANT for debugging
+// Manual cleanup endpoint
 app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     try {
         console.log(`🧹 Force cleanup requested for user ${req.userId}`);
         
-        // Destroy client if exists
         if (clients.has(req.userId)) {
             const client = clients.get(req.userId);
             try {
@@ -747,21 +719,17 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
             clients.delete(req.userId);
         }
         
-        // Clear all state
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
         
-        // Update database
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
         } catch (error) {
             console.log(`Error updating DB: ${error.message}`);
         }
         
-        // Force clean auth data
         await cleanStaleAuthData(req.userId);
         
-        // Double check and force delete
         await new Promise(resolve => setTimeout(resolve, 1000));
         const authPath = path.join('./auth_data', `session-user-${req.userId}`);
         if (fs.existsSync(authPath)) {
@@ -769,7 +737,6 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
             fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 5 });
         }
         
-        // Check all session directories for this user
         const parentDir = path.join('./auth_data');
         if (fs.existsSync(parentDir)) {
             const allDirs = fs.readdirSync(parentDir);
@@ -809,6 +776,12 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
         const { number, message } = req.body;
         
+        console.log('=== SEND MESSAGE REQUEST ===');
+        console.log('User ID:', req.userId);
+        console.log('Auth Type:', req.authType);
+        console.log('Number:', number);
+        console.log('Message:', message.substring(0, 50) + '...');
+        
         if (!number || !message) {
             return res.status(400).json({ error: 'Number and message are required' });
         }
@@ -816,6 +789,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         const client = clients.get(req.userId);
 
         if (!client) {
+            console.error('❌ Client not found for user:', req.userId);
             return res.status(400).json({ 
                 error: 'WhatsApp not connected',
                 details: 'Please connect your WhatsApp first'
@@ -823,16 +797,25 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         }
 
         const state = await client.getState();
+        console.log('Client state:', state);
+        
         if (state !== 'CONNECTED') {
-            return res.status(400).json({ error: 'WhatsApp not ready to send messages' });
+            return res.status(400).json({ 
+                error: 'WhatsApp not ready to send messages',
+                clientState: state
+            });
         }
 
+        // Format number
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
+        console.log('Chat ID:', chatId);
         
-        console.log(`📤 Sending message to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
+        // Send message
+        console.log('Sending message...');
         const sentMessage = await client.sendMessage(chatId, message);
-        console.log(`✓ Message sent successfully: ${sentMessage.id.id}`);
+        console.log('✓ Message sent successfully:', sentMessage.id.id);
 
+        // Get contact name
         let contactName = number;
         try {
             const contact = await client.getContactById(chatId);
@@ -842,10 +825,10 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         }
 
         const myInfo = client.info;
+        const authToken = req.token;
 
-        // Use API token if available, otherwise use JWT
-        const authToken = req.authType === 'api_token' ? req.token : req.token;
-
+        // Save to database
+        console.log('Saving to database...');
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
             message_id: sentMessage.id.id,
             type: 'sent',
@@ -854,15 +837,20 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             to_number: number,
             to_name: contactName,
             message_body: message,
-            has_media: false,
+            has_media: 0,
             status: 'sent',
             timestamp: sentMessage.timestamp
         }, authToken);
 
+        console.log('✓ Message saved to database with ID:', savedMessage.id);
+
+        // Update stats
         await callPHPAPI('/stats/update', 'POST', {
             field: 'sent',
             increment: 1
         }, authToken);
+
+        console.log('=== SEND SUCCESS ===');
 
         res.json({ 
             success: true, 
@@ -871,15 +859,19 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             dbId: savedMessage.id
         });
     } catch (error) {
-        console.error('✗ Error sending message:', error);
+        console.error('=== SEND ERROR ===');
+        console.error('Error:', error.message);
+        console.error('Stack:', error.stack);
         
         try {
-            const authToken = req.authType === 'api_token' ? req.token : req.token;
+            const authToken = req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
             }, authToken);
-        } catch (e) {}
+        } catch (e) {
+            console.error('Failed to update stats:', e.message);
+        }
         
         res.status(500).json({ success: false, error: error.message });
     }
@@ -888,6 +880,12 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
 app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, res) => {
     try {
         const { number, caption } = req.body;
+        
+        console.log('=== SEND MEDIA REQUEST ===');
+        console.log('User ID:', req.userId);
+        console.log('Auth Type:', req.authType);
+        console.log('Number:', number);
+        console.log('File:', req.file?.filename);
         
         if (!number) {
             return res.status(400).json({ error: 'Number is required' });
@@ -900,15 +898,31 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
         const client = clients.get(req.userId);
 
         if (!client) {
+            console.error('❌ Client not found for user:', req.userId);
+            if (req.file && fs.existsSync(req.file.path)) {
+                fs.unlinkSync(req.file.path);
+            }
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
+        const state = await client.getState();
+        console.log('Client state:', state);
+        
+        if (state !== 'CONNECTED') {
+            if (req.file && fs.existsSync(req.file.path)) {
+                fs.unlinkSync(req.file.path);
+            }
+            return res.status(400).json({ error: 'WhatsApp not ready to send messages' });
+        }
+
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
+        console.log('Chat ID:', chatId);
+
         const media = MessageMedia.fromFilePath(req.file.path);
         
-        console.log(`📤 Sending media to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
+        console.log('Sending media...');
         const sentMessage = await client.sendMessage(chatId, media, { caption });
-        console.log(`✓ Media sent successfully: ${sentMessage.id.id}`);
+        console.log('✓ Media sent successfully:', sentMessage.id.id);
 
         let contactName = number;
         try {
@@ -920,8 +934,9 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
 
         const myInfo = client.info;
         const mediaType = req.file.mimetype.split('/')[0];
-        const authToken = req.authType === 'api_token' ? req.token : req.token;
+        const authToken = req.token;
 
+        console.log('Saving to database...');
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
             message_id: sentMessage.id.id,
             type: 'sent',
@@ -930,17 +945,21 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             to_number: number,
             to_name: contactName,
             message_body: caption || null,
-            has_media: true,
+            has_media: 1,
             media_type: mediaType,
             media_url: `/uploads/${req.file.filename}`,
             status: 'sent',
             timestamp: sentMessage.timestamp
         }, authToken);
 
+        console.log('✓ Media saved to database with ID:', savedMessage.id);
+
         await callPHPAPI('/stats/update', 'POST', {
             field: 'sent',
             increment: 1
         }, authToken);
+
+        console.log('=== SEND MEDIA SUCCESS ===');
 
         res.json({ 
             success: true, 
@@ -949,19 +968,23 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             dbId: savedMessage.id
         });
     } catch (error) {
-        console.error('✗ Error sending media:', error);
+        console.error('=== SEND MEDIA ERROR ===');
+        console.error('Error:', error.message);
+        console.error('Stack:', error.stack);
         
         if (req.file && fs.existsSync(req.file.path)) {
             fs.unlinkSync(req.file.path);
         }
         
         try {
-            const authToken = req.authType === 'api_token' ? req.token : req.token;
+            const authToken = req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
             }, authToken);
-        } catch (e) {}
+        } catch (e) {
+            console.error('Failed to update stats:', e.message);
+        }
         
         res.status(500).json({ success: false, error: error.message });
     }
