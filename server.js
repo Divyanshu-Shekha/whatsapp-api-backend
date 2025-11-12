@@ -83,6 +83,7 @@ function extractToken(req) {
     return null;
 }
 
+// Middleware to verify JWT tokens (for dashboard/UI)
 async function verifyAuth(req, res, next) {
     const token = extractToken(req);
     
@@ -92,7 +93,7 @@ async function verifyAuth(req, res, next) {
     }
 
     try {
-        console.log(`🔑 Verifying token for request: ${req.method} ${req.path}`);
+        console.log(`🔑 Verifying JWT token for request: ${req.method} ${req.path}`);
         
         // Verify token by calling PHP API
         const userData = await callPHPAPI('/auth/me', 'GET', null, token);
@@ -102,13 +103,14 @@ async function verifyAuth(req, res, next) {
             return res.status(401).json({ error: 'Invalid user data' });
         }
         
-        console.log(`✅ Token verified for user ${userData.user.id} (${userData.user.email})`);
+        console.log(`✅ JWT Token verified for user ${userData.user.id} (${userData.user.email})`);
         req.userId = userData.user.id;
         req.token = token;
         req.user = userData.user;
+        req.authType = 'jwt';
         next();
     } catch (error) {
-        console.error('❌ Auth verification failed:', error.message);
+        console.error('❌ JWT Auth verification failed:', error.message);
         console.error('   Error details:', error.response?.data || error.message);
         
         // Check if it's a token signature error specifically
@@ -120,6 +122,75 @@ async function verifyAuth(req, res, next) {
         }
         
         return res.status(401).json({ error: 'Authentication failed' });
+    }
+}
+
+// NEW: Middleware to verify API tokens (for external API calls)
+async function verifyApiToken(req, res, next) {
+    const token = extractToken(req);
+    
+    if (!token) {
+        console.error('❌ No API token provided');
+        return res.status(401).json({ error: 'API token required' });
+    }
+
+    try {
+        console.log(`🔑 Verifying API token for request: ${req.method} ${req.path}`);
+        console.log(`   Token preview: ${token.substring(0, 10)}...`);
+        
+        // Verify API token by calling PHP API
+        const result = await callPHPAPI('/tokens/verify', 'POST', { token });
+        
+        if (!result || !result.valid) {
+            console.error('❌ Invalid API token');
+            return res.status(401).json({ error: 'Invalid or expired API token' });
+        }
+        
+        console.log(`✅ API Token verified for user ${result.user_id}`);
+        req.userId = result.user_id;
+        req.token = token;
+        req.apiTokenData = result;
+        req.authType = 'api_token';
+        
+        // Update token usage stats
+        try {
+            await callPHPAPI('/tokens/update-usage', 'POST', { token });
+        } catch (error) {
+            console.error('Warning: Failed to update token usage:', error.message);
+        }
+        
+        next();
+    } catch (error) {
+        console.error('❌ API Token verification failed:', error.message);
+        console.error('   Error details:', error.response?.data || error.message);
+        
+        return res.status(401).json({ 
+            error: 'Invalid API token',
+            details: error.response?.data?.error || 'Token verification failed'
+        });
+    }
+}
+
+// NEW: Combined middleware - accepts both JWT and API tokens
+async function verifyAnyToken(req, res, next) {
+    const token = extractToken(req);
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Authentication token required' });
+    }
+
+    // Check token length to determine type
+    // JWT tokens are much longer (3 parts separated by dots)
+    // API tokens are typically 64 characters (sha256 hash)
+    
+    const isJWT = token.includes('.') && token.split('.').length === 3;
+    
+    if (isJWT) {
+        console.log('🔑 Detected JWT token, using JWT auth');
+        return verifyAuth(req, res, next);
+    } else {
+        console.log('🔑 Detected API token, using API token auth');
+        return verifyApiToken(req, res, next);
     }
 }
 
@@ -733,8 +804,8 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     }
 });
 
-// Messaging Routes
-app.post('/api/send-message', verifyAuth, async (req, res) => {
+// Messaging Routes - Accept both JWT and API tokens
+app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
         const { number, message } = req.body;
         
@@ -745,7 +816,10 @@ app.post('/api/send-message', verifyAuth, async (req, res) => {
         const client = clients.get(req.userId);
 
         if (!client) {
-            return res.status(400).json({ error: 'WhatsApp not connected' });
+            return res.status(400).json({ 
+                error: 'WhatsApp not connected',
+                details: 'Please connect your WhatsApp first'
+            });
         }
 
         const state = await client.getState();
@@ -755,7 +829,7 @@ app.post('/api/send-message', verifyAuth, async (req, res) => {
 
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
         
-        console.log(`📤 Sending message to ${chatId} for user ${req.userId}`);
+        console.log(`📤 Sending message to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
         const sentMessage = await client.sendMessage(chatId, message);
         console.log(`✓ Message sent successfully: ${sentMessage.id.id}`);
 
@@ -769,6 +843,9 @@ app.post('/api/send-message', verifyAuth, async (req, res) => {
 
         const myInfo = client.info;
 
+        // Use API token if available, otherwise use JWT
+        const authToken = req.authType === 'api_token' ? req.token : req.token;
+
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
             message_id: sentMessage.id.id,
             type: 'sent',
@@ -780,12 +857,12 @@ app.post('/api/send-message', verifyAuth, async (req, res) => {
             has_media: false,
             status: 'sent',
             timestamp: sentMessage.timestamp
-        }, req.token);
+        }, authToken);
 
         await callPHPAPI('/stats/update', 'POST', {
             field: 'sent',
             increment: 1
-        }, req.token);
+        }, authToken);
 
         res.json({ 
             success: true, 
@@ -797,17 +874,18 @@ app.post('/api/send-message', verifyAuth, async (req, res) => {
         console.error('✗ Error sending message:', error);
         
         try {
+            const authToken = req.authType === 'api_token' ? req.token : req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
-            }, req.token);
+            }, authToken);
         } catch (e) {}
         
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-app.post('/api/send-media', verifyAuth, upload.single('file'), async (req, res) => {
+app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, res) => {
     try {
         const { number, caption } = req.body;
         
@@ -828,7 +906,7 @@ app.post('/api/send-media', verifyAuth, upload.single('file'), async (req, res) 
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
         const media = MessageMedia.fromFilePath(req.file.path);
         
-        console.log(`📤 Sending media to ${chatId} for user ${req.userId}`);
+        console.log(`📤 Sending media to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
         const sentMessage = await client.sendMessage(chatId, media, { caption });
         console.log(`✓ Media sent successfully: ${sentMessage.id.id}`);
 
@@ -842,6 +920,7 @@ app.post('/api/send-media', verifyAuth, upload.single('file'), async (req, res) 
 
         const myInfo = client.info;
         const mediaType = req.file.mimetype.split('/')[0];
+        const authToken = req.authType === 'api_token' ? req.token : req.token;
 
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
             message_id: sentMessage.id.id,
@@ -856,12 +935,12 @@ app.post('/api/send-media', verifyAuth, upload.single('file'), async (req, res) 
             media_url: `/uploads/${req.file.filename}`,
             status: 'sent',
             timestamp: sentMessage.timestamp
-        }, req.token);
+        }, authToken);
 
         await callPHPAPI('/stats/update', 'POST', {
             field: 'sent',
             increment: 1
-        }, req.token);
+        }, authToken);
 
         res.json({ 
             success: true, 
@@ -877,17 +956,19 @@ app.post('/api/send-media', verifyAuth, upload.single('file'), async (req, res) 
         }
         
         try {
+            const authToken = req.authType === 'api_token' ? req.token : req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
-            }, req.token);
+            }, authToken);
         } catch (e) {}
         
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-app.get('/api/chats', verifyAuth, async (req, res) => {
+// Public endpoints - only accept API tokens
+app.get('/api/chats', verifyApiToken, async (req, res) => {
     try {
         const client = clients.get(req.userId);
         if (!client) {
@@ -907,7 +988,7 @@ app.get('/api/chats', verifyAuth, async (req, res) => {
     }
 });
 
-app.get('/api/contacts', verifyAuth, async (req, res) => {
+app.get('/api/contacts', verifyApiToken, async (req, res) => {
     try {
         const client = clients.get(req.userId);
         if (!client) {
