@@ -87,20 +87,39 @@ async function verifyAuth(req, res, next) {
     const token = extractToken(req);
     
     if (!token) {
+        console.error('❌ No token provided in request');
         return res.status(401).json({ error: 'No token provided' });
     }
 
     try {
+        console.log(`🔑 Verifying token for request: ${req.method} ${req.path}`);
+        
+        // Verify token by calling PHP API
         const userData = await callPHPAPI('/auth/me', 'GET', null, token);
+        
         if (!userData || !userData.user) {
+            console.error('❌ Invalid user data received from PHP API');
             return res.status(401).json({ error: 'Invalid user data' });
         }
+        
+        console.log(`✅ Token verified for user ${userData.user.id} (${userData.user.email})`);
         req.userId = userData.user.id;
         req.token = token;
+        req.user = userData.user;
         next();
     } catch (error) {
-        console.error('Auth verification failed:', error.message);
-        return res.status(401).json({ error: 'Invalid token' });
+        console.error('❌ Auth verification failed:', error.message);
+        console.error('   Error details:', error.response?.data || error.message);
+        
+        // Check if it's a token signature error specifically
+        if (error.message.includes('signature') || error.message.includes('Invalid token')) {
+            return res.status(401).json({ 
+                error: 'Invalid token signature',
+                details: 'Please log out and log in again'
+            });
+        }
+        
+        return res.status(401).json({ error: 'Authentication failed' });
     }
 }
 
