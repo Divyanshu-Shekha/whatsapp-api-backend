@@ -302,12 +302,89 @@ async function cleanStaleAuthData(userId) {
         await safeDeleteAuthFolder(authPath);
     }
 }
+function configureClientHeartbeat(client, userId, token) {
+    let heartbeatInterval = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 5;
+
+    // Send periodic keep-alive pings
+    const startHeartbeat = () => {
+        heartbeatInterval = setInterval(async () => {
+            try {
+                if (client && !client.pupBrowser?.process?.killed) {
+                    const state = await client.getState();
+                    if (state === 'CONNECTED') {
+                        console.log(`💓 Heartbeat - Client alive for user ${userId}`);
+                        reconnectAttempts = 0; // Reset on successful ping
+                    } else if (state !== 'CONNECTING') {
+                        console.warn(`⚠️ Heartbeat detected disconnected state: ${state}`);
+                    }
+                }
+            } catch (error) {
+                console.error(`❌ Heartbeat error for user ${userId}:`, error.message);
+            }
+        }, 30000); // Check every 30 seconds
+
+        return heartbeatInterval;
+    };
+
+    const stopHeartbeat = () => {
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+        }
+    };
+
+    // Handle connection loss with auto-reconnect
+    client.on('auth_failure', async (msg) => {
+        console.error(`❌ Auth failure for user ${userId}:`, msg);
+        stopHeartbeat();
+        clientInitializing.delete(userId);
+        qrCodes.delete(userId);
+        await cleanStaleAuthData(userId);
+    });
+
+    client.on('disconnected', async (reason) => {
+        console.log(`🔌 Client disconnected for user ${userId}. Reason: ${reason}`);
+        stopHeartbeat();
+        
+        try {
+            await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
+            qrCodes.delete(userId);
+            clients.delete(userId);
+            clientInitializing.delete(userId);
+            console.log(`🧹 Session data cleared for user ${userId} after disconnect`);
+            
+            setTimeout(async () => {
+                await cleanStaleAuthData(userId);
+            }, 3000);
+        } catch (error) {
+            console.error(`❌ Error cleaning up after disconnect for user ${userId}:`, error.message);
+        }
+    });
+
+    // Start heartbeat after successful connection
+    client.on('ready', async () => {
+        const info = client.info;
+        try {
+            await callPHPAPI('/whatsapp/session/update', 'POST', {
+                phone_number: info.wid.user,
+                pushname: info.pushname,
+                is_active: true
+            }, token);
+            
+            startHeartbeat();
+            console.log(`✅ Client ready with heartbeat started for user ${userId}: ${info.pushname}`);
+        } catch (error) {
+            console.error('❌ Error updating session:', error.message);
+        }
+    });
+
+    return { startHeartbeat, stopHeartbeat };
+}
 
 // Initialize WhatsApp Client
-// Replace your initializeClientForUser function with this improved version
-
 async function initializeClientForUser(userId, token, forceNew = false) {
-    // Prevent multiple initializations
     if (clientInitializing.get(userId)) {
         console.log(`⏳ Client already initializing for user ${userId}, waiting...`);
         let attempts = 0;
@@ -324,8 +401,8 @@ async function initializeClientForUser(userId, token, forceNew = false) {
     if (forceNew) {
         console.log(`🧹 Force cleaning auth data for user ${userId}`);
         await cleanStaleAuthData(userId);
-        await new Promise(resolve => setTimeout(resolve, 500));
         
+        await new Promise(resolve => setTimeout(resolve, 500));
         const authPath = path.join('./auth_data', `session-user-${userId}`);
         if (fs.existsSync(authPath)) {
             console.log(`⚠️ Auth data still exists, force deleting again...`);
@@ -352,39 +429,15 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    // Remove --single-process, add these instead:
+                    '--single-process',
                     '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--disable-background-networking',
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-breakpad',
-                    '--disable-component-extensions-with-background-pages',
-                    '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-                    '--disable-ipc-flooding-protection',
-                    '--disable-renderer-backgrounding',
-                    '--enable-features=NetworkService,NetworkServiceInProcess',
-                    '--force-color-profile=srgb',
-                    '--hide-scrollbars',
-                    '--metrics-recording-only',
-                    '--mute-audio',
-                    '--headless=new'
-                ],
-                // Add timeout configurations
-                timeout: 60000,
-                protocolTimeout: 240000
-            },
-            // Add these important options for stability
-            restartOnAuthFail: true,
-            qrMaxRetries: 5,
-            takeoverOnConflict: false,
-            takeoverTimeoutMs: 0
+                    '--disable-web-resources'  // NEW: Prevent resource timeouts
+                ]
+            }
         });
 
         let qrGenerated = false;
         let authenticated = false;
-        let keepAliveInterval = null;
 
         client.on('qr', async (qr) => {
             qrGenerated = true;
@@ -399,38 +452,8 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             qrCodes.delete(userId);
         });
 
-        client.on('ready', async () => {
-            const info = client.info;
-            
-            try {
-                await callPHPAPI('/whatsapp/session/update', 'POST', {
-                    phone_number: info.wid.user,
-                    pushname: info.pushname,
-                    is_active: true
-                }, token);
-                
-                console.log(`✓ Client ready for user ${userId}: ${info.pushname}`);
-                
-                // *** CRITICAL FIX: Add keep-alive ping ***
-                // This prevents Render from killing the connection
-                keepAliveInterval = setInterval(async () => {
-                    try {
-                        const state = await client.getState();
-                        console.log(`💓 Keep-alive check for user ${userId}: ${state}`);
-                        
-                        // Send a lightweight request to keep connection alive
-                        if (state === 'CONNECTED') {
-                            await client.getChats().catch(() => {});
-                        }
-                    } catch (error) {
-                        console.error(`✗ Keep-alive failed for user ${userId}:`, error.message);
-                    }
-                }, 30000); // Every 30 seconds
-                
-            } catch (error) {
-                console.error('✗ Error updating session:', error.message);
-            }
-        });
+        // CONFIGURE HEARTBEAT AND EVENT HANDLERS
+        const { startHeartbeat, stopHeartbeat } = configureClientHeartbeat(client, userId, token);
 
         client.on('message', async (message) => {
             try {
@@ -483,66 +506,9 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             }
         });
 
-        client.on('disconnected', async (reason) => {
-            console.log(`✗ Client disconnected for user ${userId}. Reason:`, reason);
-            
-            // Clear keep-alive interval
-            if (keepAliveInterval) {
-                clearInterval(keepAliveInterval);
-                keepAliveInterval = null;
-            }
-            
-            try {
-                await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
-                
-                qrCodes.delete(userId);
-                clients.delete(userId);
-                clientInitializing.delete(userId);
-
-                console.log(`🧹 Session data cleared for user ${userId} after disconnect`);
-
-                // Clean auth data after disconnect
-                setTimeout(async () => {
-                    await cleanStaleAuthData(userId);
-                }, 3000);
-                
-            } catch (error) {
-                console.error(`✗ Error cleaning up after disconnect for user ${userId}:`, error.message);
-            }
-        });
-
-        client.on('auth_failure', async (msg) => {
-            console.error(`✗ Auth failure for user ${userId}:`, msg);
-            
-            // Clear keep-alive interval
-            if (keepAliveInterval) {
-                clearInterval(keepAliveInterval);
-            }
-            
-            clientInitializing.delete(userId);
-            qrCodes.delete(userId);
-            
-            await cleanStaleAuthData(userId);
-        });
-
-        client.on('loading_screen', (percent, message) => {
-            console.log(`📊 Loading screen for user ${userId}: ${percent}% - ${message}`);
-        });
-
-        // *** NEW: Add error handler for unexpected crashes ***
-        client.on('error', (error) => {
-            console.error(`✗ Client error for user ${userId}:`, error);
-        });
-
-        // *** NEW: Add remote session saved handler ***
-        client.on('remote_session_saved', () => {
-            console.log(`💾 Remote session saved for user ${userId}`);
-        });
-
         console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
         await client.initialize();
         
-        // Wait up to 15 seconds for QR generation or authentication
         let waitTime = 0;
         while (waitTime < 15000 && !qrGenerated && !authenticated) {
             await new Promise(resolve => setTimeout(resolve, 500));
@@ -554,14 +520,11 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
             
             if (state === 'CONNECTED' && !qrGenerated && forceNew) {
-                console.error(`❌ ERROR: Client connected without QR despite forceNew!`);
+                console.error(`❌ ERROR: Client connected without QR despite forceNew! This should not happen.`);
                 console.log(`🔄 Destroying and retrying...`);
                 
-                if (keepAliveInterval) {
-                    clearInterval(keepAliveInterval);
-                }
-                
                 await client.destroy();
+                stopHeartbeat();
                 await cleanStaleAuthData(userId);
                 clientInitializing.delete(userId);
                 
