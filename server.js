@@ -306,22 +306,54 @@ function configureClientHeartbeat(client, userId, token) {
     let heartbeatInterval = null;
     let reconnectAttempts = 0;
     const MAX_RECONNECT_ATTEMPTS = 5;
+    let isDestroyed = false; // Track if client is being destroyed
 
-    // Send periodic keep-alive pings
+    // Send periodic keep-alive pings with proper error handling
     const startHeartbeat = () => {
+        // Clear any existing interval
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
+
         heartbeatInterval = setInterval(async () => {
+            // Skip if client is destroyed
+            if (isDestroyed) {
+                stopHeartbeat();
+                return;
+            }
+
             try {
-                if (client && !client.pupBrowser?.process?.killed) {
-                    const state = await client.getState();
-                    if (state === 'CONNECTED') {
-                        console.log(`💓 Heartbeat - Client alive for user ${userId}`);
-                        reconnectAttempts = 0; // Reset on successful ping
-                    } else if (state !== 'CONNECTING') {
-                        console.warn(`⚠️ Heartbeat detected disconnected state: ${state}`);
-                    }
+                // Check if client exists and browser is alive
+                if (!client || !client.pupBrowser || client.pupBrowser.process?.killed) {
+                    console.log(`⚠️ Heartbeat: Client or browser not available for user ${userId}`);
+                    stopHeartbeat();
+                    return;
+                }
+
+                // Safely check state with timeout
+                const statePromise = client.getState();
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('State check timeout')), 5000)
+                );
+
+                const state = await Promise.race([statePromise, timeoutPromise]);
+                
+                if (state === 'CONNECTED') {
+                    console.log(`💓 Heartbeat - Client alive for user ${userId}`);
+                    reconnectAttempts = 0; // Reset on successful ping
+                } else if (state !== 'CONNECTING') {
+                    console.warn(`⚠️ Heartbeat detected disconnected state: ${state}`);
                 }
             } catch (error) {
-                console.error(`❌ Heartbeat error for user ${userId}:`, error.message);
+                // Only log non-navigation errors
+                if (!error.message.includes('Execution context was destroyed') &&
+                    !error.message.includes('navigation') &&
+                    !error.message.includes('Session closed')) {
+                    console.error(`❌ Heartbeat error for user ${userId}:`, error.message);
+                } else {
+                    console.log(`⚠️ Heartbeat stopped due to page navigation for user ${userId}`);
+                    stopHeartbeat();
+                }
             }
         }, 30000); // Check every 30 seconds
 
@@ -332,34 +364,56 @@ function configureClientHeartbeat(client, userId, token) {
         if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
             heartbeatInterval = null;
+            console.log(`🛑 Heartbeat stopped for user ${userId}`);
         }
     };
 
     // Handle connection loss with auto-reconnect
     client.on('auth_failure', async (msg) => {
         console.error(`❌ Auth failure for user ${userId}:`, msg);
+        isDestroyed = true;
         stopHeartbeat();
         clientInitializing.delete(userId);
         qrCodes.delete(userId);
-        await cleanStaleAuthData(userId);
+        
+        // Wait before cleaning auth data
+        setTimeout(async () => {
+            await cleanStaleAuthData(userId);
+        }, 2000);
     });
 
     client.on('disconnected', async (reason) => {
         console.log(`🔌 Client disconnected for user ${userId}. Reason: ${reason}`);
+        isDestroyed = true;
         stopHeartbeat();
         
         try {
+            // Update database first
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
+            
+            // Clean up in-memory state
             qrCodes.delete(userId);
             clients.delete(userId);
             clientInitializing.delete(userId);
+            
             console.log(`🧹 Session data cleared for user ${userId} after disconnect`);
             
+            // Clean auth data after a delay to ensure client is fully destroyed
             setTimeout(async () => {
                 await cleanStaleAuthData(userId);
             }, 3000);
         } catch (error) {
             console.error(`❌ Error cleaning up after disconnect for user ${userId}:`, error.message);
+        }
+    });
+
+    // Handle page navigation/logout
+    client.on('change_state', (state) => {
+        console.log(`🔄 State change for user ${userId}: ${state}`);
+        if (state === 'CONFLICT' || state === 'UNPAIRED') {
+            console.log(`⚠️ Client conflict/unpaired for user ${userId}, stopping heartbeat`);
+            isDestroyed = true;
+            stopHeartbeat();
         }
     });
 
@@ -373,16 +427,26 @@ function configureClientHeartbeat(client, userId, token) {
                 is_active: true
             }, token);
             
-            startHeartbeat();
-            console.log(`✅ Client ready with heartbeat started for user ${userId}: ${info.pushname}`);
+            // Only start heartbeat if not destroyed
+            if (!isDestroyed) {
+                startHeartbeat();
+                console.log(`✅ Client ready with heartbeat started for user ${userId}: ${info.pushname}`);
+            }
         } catch (error) {
             console.error('❌ Error updating session:', error.message);
         }
     });
 
+    // Override destroy method to set flag
+    const originalDestroy = client.destroy.bind(client);
+    client.destroy = async function() {
+        isDestroyed = true;
+        stopHeartbeat();
+        return originalDestroy();
+    };
+
     return { startHeartbeat, stopHeartbeat };
 }
-
 // Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
     if (clientInitializing.get(userId)) {
