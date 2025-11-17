@@ -45,10 +45,6 @@ const qrCodes = new Map();
 const clientInitializing = new Map();
 const initializationPromises = new Map();
 const eventListenersAttached = new Map();
-const userSessions = new Map(); // Store user phone numbers
-
-// Logger configuration
-const logger = Pino({ level: 'error' });
 
 // Helper function to call PHP API
 async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
@@ -320,7 +316,7 @@ function configureClientHeartbeat(client, userId, token) {
         }
     };
 
-    // Connection update handler - CRITICAL: Must be first event
+    // Connection update handler - FIXED: Proper QR code handling
     client.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr, isOnline } = update;
 
@@ -330,6 +326,7 @@ function configureClientHeartbeat(client, userId, token) {
         console.log(`  Online: ${isOnline}`);
         console.log(`  Disconnect: ${lastDisconnect?.error?.output?.statusCode}`);
 
+        // FIX: Proper QR code generation and storage
         if (qr) {
             try {
                 console.log(`\n🔲 QR CODE RECEIVED - Converting to Data URL...`);
@@ -349,7 +346,6 @@ function configureClientHeartbeat(client, userId, token) {
 
         if (connection === 'open') {
             console.log(`\n✅ CONNECTION OPEN for user ${userId}`);
-            console.log(`👤 Client User:`, JSON.stringify(client.user, null, 2));
             qrCodes.delete(userId);
             
             try {
@@ -357,16 +353,16 @@ function configureClientHeartbeat(client, userId, token) {
                 if (info && info.id) {
                     const phoneNumber = info.id.split(':')[0];
                     console.log(`\n📞 Extracted Phone: ${phoneNumber}`);
-                    console.log(`👤 Push Name: ${info.pushName || 'N/A'}`);
+                    console.log(`👤 Push Name: ${info.name || info.pushname || 'N/A'}`);
                     
                     console.log(`\n📤 Updating session in database...`);
                     const sessionResult = await callPHPAPI('/whatsapp/session/update', 'POST', {
                         phone_number: phoneNumber,
-                        pushname: info.pushName || info.name || 'User',
+                        pushname: info.name || info.pushname || 'User',
                         is_active: true
                     }, token);
                     
-                    console.log(`✅ Session updated in database:`, JSON.stringify(sessionResult, null, 2));
+                    console.log(`✅ Session updated in database`);
                     
                     if (!isDestroyed) {
                         startHeartbeat();
@@ -394,7 +390,6 @@ function configureClientHeartbeat(client, userId, token) {
                 clientInitializing.delete(userId);
                 initializationPromises.delete(userId);
                 eventListenersAttached.delete(userId);
-                userSessions.delete(userId);
                 
                 try {
                     await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
@@ -464,9 +459,9 @@ function configureClientHeartbeat(client, userId, token) {
                 message_id: message.key.id,
                 type: 'received',
                 from_number: phoneNumber,
-                from_name: contact?.name || contact?.pushName || phoneNumber,
+                from_name: contact?.name || contact?.pushname || phoneNumber,
                 to_number: myInfo.id.split(':')[0],
-                to_name: myInfo.pushName || myInfo.name || 'User',
+                to_name: myInfo.name || myInfo.pushname || 'User',
                 message_body: messageBody,
                 has_media: hasMedia,
                 media_type: mediaType,
@@ -481,23 +476,10 @@ function configureClientHeartbeat(client, userId, token) {
         }
     });
 
-    // Override destroy method
-    const originalEnd = client.end.bind(client);
-    client.end = async function() {
-        isDestroyed = true;
-        stopHeartbeat();
-        eventListenersAttached.delete(userId);
-        try {
-            return await originalEnd();
-        } catch (error) {
-            console.error('Error during client.end():', error.message);
-        }
-    };
-
     return { startHeartbeat, stopHeartbeat };
 }
 
-// Initialize WhatsApp Client
+// Initialize WhatsApp Client - FIXED VERSION
 async function initializeClientForUser(userId, token, forceNew = false) {
     if (initializationPromises.has(userId)) {
         console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
@@ -507,68 +489,60 @@ async function initializeClientForUser(userId, token, forceNew = false) {
     const initPromise = (async () => {
         try {
             clientInitializing.set(userId, true);
-            console.log(`\n╔════════════════════════════════════════╗`);
-            console.log(`║ 🔄 INITIALIZING CLIENT FOR USER ${userId}`);
-            console.log(`║ Force New: ${forceNew}`);
-            console.log(`╚════════════════════════════════════════╝\n`);
+            console.log(`\n🔄 INITIALIZING CLIENT FOR USER ${userId} (forceNew: ${forceNew})`);
 
             if (forceNew) {
                 console.log(`🧹 Cleaning auth data for user ${userId}...`);
                 await cleanStaleAuthData(userId);
                 await new Promise(resolve => setTimeout(resolve, 500));
-                console.log(`✅ Auth data cleaned\n`);
+                console.log(`✅ Auth data cleaned`);
             }
 
             const authPath = `./auth_data/user-${userId}`;
             console.log(`📂 Auth Path: ${authPath}`);
             
             const { state, saveCreds } = await useMultiFileAuthState(authPath);
-            console.log(`✅ Auth state loaded\n`);
+            console.log(`✅ Auth state loaded`);
 
             console.log(`📋 Creating socket...`);
             const client = makeWASocket({
                 auth: state,
                 logger: Pino({ level: 'silent' }),
-                printQRInTerminal: false,
+                printQRInTerminal: true, // Enable for debugging
                 browser: ['WhatsApp', 'Chrome', '120.0'],
                 defaultQueryTimeoutMs: 30000,
                 retryRequestDelayMs: 100,
                 maxRetries: 5
             });
 
-            console.log(`✅ Socket created\n`);
+            console.log(`✅ Socket created`);
 
             // Save credentials on update
             client.ev.on('creds.update', saveCreds);
-            console.log(`✅ Credentials listener attached\n`);
+            console.log(`✅ Credentials listener attached`);
 
             // Configure event listeners
             console.log(`🔧 Configuring event listeners...`);
             configureClientHeartbeat(client, userId, token);
-            console.log(`✅ Event listeners configured\n`);
+            console.log(`✅ Event listeners configured`);
 
             // Store client
             clients.set(userId, client);
-            console.log(`✅ Client stored in map\n`);
+            console.log(`✅ Client stored in map`);
             
             clientInitializing.delete(userId);
 
             // Wait for QR or connection
-            console.log(`⏳ Waiting for connection/QR (max 30 seconds)...`);
+            console.log(`⏳ Waiting for connection/QR (max 15 seconds)...`);
             let waitTime = 0;
-            const maxWait = 30000;
+            const maxWait = 15000;
             
             while (waitTime < maxWait) {
                 const qr = qrCodes.get(userId);
                 const isConnected = client.user && client.user.id;
                 
-                if (qr) {
-                    console.log(`✅ QR Code available after ${waitTime}ms\n`);
-                    break;
-                }
-                
-                if (isConnected) {
-                    console.log(`✅ Already authenticated after ${waitTime}ms\n`);
+                if (qr || isConnected) {
+                    console.log(`✅ QR/Connection available after ${waitTime}ms`);
                     break;
                 }
                 
@@ -576,17 +550,14 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 waitTime += 500;
             }
 
-            console.log(`╔════════════════════════════════════════╗`);
-            console.log(`║ ✅ INITIALIZATION COMPLETE`);
-            console.log(`║ QR Available: ${!!qrCodes.get(userId)}`);
-            console.log(`║ Connected: ${!!client.user}`);
-            console.log(`║ User ID: ${userId}`);
-            console.log(`╚════════════════════════════════════════╝\n`);
+            console.log(`✅ INITIALIZATION COMPLETE`);
+            console.log(`   QR Available: ${!!qrCodes.get(userId)}`);
+            console.log(`   Connected: ${!!client.user}`);
+            console.log(`   User ID: ${userId}\n`);
             
             return client;
         } catch (error) {
-            console.error(`\n❌ Error initializing client for user ${userId}:`, error.message);
-            console.error(error.stack);
+            console.error(`❌ Error initializing client for user ${userId}:`, error.message);
             clientInitializing.delete(userId);
             initializationPromises.delete(userId);
             eventListenersAttached.delete(userId);
@@ -621,12 +592,11 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             const client = clients.get(req.userId);
             console.log(`🧹 Destroying existing client for user ${req.userId}`);
             try {
-                await client.end();
+                client.ev.removeAllListeners();
             } catch (error) {
                 console.log(`✗ Error destroying client: ${error.message}`);
             }
             clients.delete(req.userId);
-            eventListenersAttached.delete(req.userId);
         }
 
         qrCodes.delete(req.userId);
@@ -647,10 +617,11 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
-        const client = await initializeClientForUser(req.userId, req.token, true);
+        await initializeClientForUser(req.userId, req.token, true);
         
         const qr = qrCodes.get(req.userId);
-        const isConnected = client.user && client.user.id;
+        const client = clients.get(req.userId);
+        const isConnected = client && client.user;
         
         console.log(`\n📊 INITIALIZATION RESULT FOR USER ${req.userId}:`);
         console.log(`   QR Code: ${qr ? 'AVAILABLE' : 'NOT AVAILABLE'}`);
@@ -662,7 +633,7 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             message: qr ? 'QR code ready, please scan' : 'Awaiting connection or QR code',
             userId: req.userId,
             hasQR: !!qr,
-            isConnected: isConnected,
+            isConnected: !!isConnected,
             clientReady: !!client
         });
     } catch (error) {
@@ -757,7 +728,7 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
         
         if (client) {
             try {
-                await client.end();
+                client.ev.removeAllListeners();
                 console.log(`✓ Client destroyed for user ${req.userId}`);
             } catch (error) {
                 console.error('✗ Error destroying client:', error.message);
@@ -768,7 +739,6 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
         eventListenersAttached.delete(req.userId);
-        userSessions.delete(req.userId);
 
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
@@ -796,7 +766,7 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
         if (clients.has(req.userId)) {
             const client = clients.get(req.userId);
             try {
-                await client.end();
+                client.ev.removeAllListeners();
             } catch (error) {
                 console.log(`Error destroying client: ${error.message}`);
             }
@@ -806,7 +776,6 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
         eventListenersAttached.delete(req.userId);
-        userSessions.delete(req.userId);
         
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
@@ -867,7 +836,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         let contactName = number;
         try {
             const contact = await client.getContactById(jid);
-            contactName = contact?.name || contact?.pushName || number;
+            contactName = contact?.name || contact?.pushname || number;
         } catch (err) {
             console.log('Could not get contact name:', err.message);
         }
@@ -879,7 +848,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             message_id: sentMessage.key.id,
             type: 'sent',
             from_number: phoneNumber,
-            from_name: myInfo.pushName || myInfo.name || 'User',
+            from_name: myInfo.name || myInfo.pushname || 'User',
             to_number: number,
             to_name: contactName,
             message_body: message,
@@ -958,7 +927,7 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
         let contactName = number;
         try {
             const contact = await client.getContactById(jid);
-            contactName = contact?.name || contact?.pushName || number;
+            contactName = contact?.name || contact?.pushname || number;
         } catch (err) {
             console.log('Could not get contact name:', err.message);
         }
@@ -971,7 +940,7 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             message_id: sentMessage.key.id,
             type: 'sent',
             from_number: phoneNumber,
-            from_name: myInfo.pushName || myInfo.name || 'User',
+            from_name: myInfo.name || myInfo.pushname || 'User',
             to_number: number,
             to_name: contactName,
             message_body: caption || null,
@@ -1044,7 +1013,7 @@ app.get('/api/contacts', verifyApiToken, async (req, res) => {
             .filter(c => !c.isGroup && c.id !== 'status@broadcast')
             .map(c => ({
                 id: c.id,
-                name: c.name || c.pushName,
+                name: c.name || c.pushname,
                 number: c.id.split('@')[0]
             }));
         res.json(contactList);
@@ -1176,7 +1145,7 @@ process.on('SIGTERM', async () => {
     console.log('🛑 SIGTERM received, cleaning up...');
     for (const [userId, client] of clients.entries()) {
         try {
-            await client.end();
+            client.ev.removeAllListeners();
             console.log(`✓ Destroyed client for user ${userId}`);
         } catch (error) {
             console.error(`✗ Error destroying client for user ${userId}:`, error);
@@ -1189,7 +1158,7 @@ process.on('SIGINT', async () => {
     console.log('🛑 SIGINT received, cleaning up...');
     for (const [userId, client] of clients.entries()) {
         try {
-            await client.end();
+            client.ev.removeAllListeners();
             console.log(`✓ Destroyed client for user ${userId}`);
         } catch (error) {
             console.error(`✗ Error destroying client for user ${userId}:`, error);
