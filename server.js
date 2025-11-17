@@ -324,13 +324,15 @@ function configureClientHeartbeat(client, userId, token) {
     client.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        console.log(`[Connection Update] Connection: ${connection}, Has QR: ${!!qr}, Disconnect Code: ${lastDisconnect?.error?.output?.statusCode}`);
+        console.log(`[🔗 Connection Update] connection: ${connection}, qr: ${!!qr}, disconnect: ${lastDisconnect?.error?.output?.statusCode}`);
 
         if (qr) {
             try {
+                console.log(`🔲 QR String received, length: ${qr.length}`);
                 const qrData = await QRCode.toDataURL(qr);
                 qrCodes.set(userId, qrData);
-                console.log(`📱 QR Code generated for user ${userId}`);
+                console.log(`✅ QR Code successfully stored for user ${userId}`);
+                console.log(`📊 Total QR codes in cache: ${qrCodes.size}`);
             } catch (error) {
                 console.error('❌ Error converting QR to data URL:', error.message);
             }
@@ -342,13 +344,17 @@ function configureClientHeartbeat(client, userId, token) {
 
         if (connection === 'open') {
             console.log(`✅ Client connected for user ${userId}`);
+            console.log(`👤 User info:`, client.user);
             qrCodes.delete(userId);
             
             try {
                 const info = client.user;
                 if (info) {
+                    const phoneNumber = info.id.split(':')[0];
+                    console.log(`📞 Phone: ${phoneNumber}`);
+                    
                     await callPHPAPI('/whatsapp/session/update', 'POST', {
-                        phone_number: info.id.split(':')[0],
+                        phone_number: phoneNumber,
                         pushname: info.pushName || info.name || 'User',
                         is_active: true
                     }, token);
@@ -357,6 +363,8 @@ function configureClientHeartbeat(client, userId, token) {
                         startHeartbeat();
                         console.log(`✅ Client ready with heartbeat started for user ${userId}`);
                     }
+                } else {
+                    console.log(`⚠️ Client.user is undefined`);
                 }
             } catch (error) {
                 console.error('❌ Error updating session:', error.message);
@@ -499,19 +507,23 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             const { state, saveCreds } = await useMultiFileAuthState(`./auth_data/user-${userId}`);
 
+            console.log(`📋 Creating socket with auth state for user ${userId}`);
+            
             const client = makeWASocket({
                 auth: state,
-                logger: logger,
+                logger: Pino({ level: 'silent' }), // Silent to avoid spam
                 printQRInTerminal: false,
                 browser: ['WhatsApp', 'Chrome', '120.0'],
                 defaultQueryTimeoutMs: 30000,
                 retryRequestDelayMs: 100,
-                maxRetries: 5,
-                version: [2, 2412, 1]
+                maxRetries: 5
             });
 
-            // Save credentials on update
+            console.log(`✅ Socket created for user ${userId}`);
+
+            // Save credentials on update - ATTACH FIRST
             client.ev.on('creds.update', saveCreds);
+            console.log(`✅ Credentials update listener attached for user ${userId}`);
 
             // Configure event listeners BEFORE storing client
             console.log(`🔧 Configuring event listeners for user ${userId}`);
@@ -519,11 +531,16 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             // Store client AFTER event listeners are attached
             clients.set(userId, client);
+            console.log(`✅ Client stored in clients map for user ${userId}`);
+            
             clientInitializing.delete(userId);
             console.log(`✓ Client successfully initialized for user ${userId}`);
             
-            // Add small delay to ensure connection attempt starts
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Wait a bit for connection update event
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            console.log(`📊 Client state check for user ${userId}: ${client.user ? 'AUTHENTICATED' : 'WAITING_FOR_QR'}`);
+            console.log(`📊 QR codes in map: ${Array.from(qrCodes.keys())}`);
             
             return client;
         } catch (error) {
@@ -588,11 +605,17 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
-        await initializeClientForUser(req.userId, req.token, true);
+        const client = await initializeClientForUser(req.userId, req.token, true);
+        
+        console.log(`✅ Initialization complete for user ${req.userId}`);
+        console.log(`📊 QR codes available: ${Array.from(qrCodes.keys())}`);
+        console.log(`📊 Current QR for user: ${qrCodes.get(req.userId) ? 'YES' : 'NO'}`);
         
         res.json({ 
             success: true, 
-            message: 'WhatsApp client initializing, please scan QR code' 
+            message: 'WhatsApp client initializing, please scan QR code',
+            userId: req.userId,
+            hasQR: !!qrCodes.get(req.userId)
         });
     } catch (error) {
         console.error('✗ Initialize error:', error);
