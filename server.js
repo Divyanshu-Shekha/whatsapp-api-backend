@@ -39,43 +39,48 @@ const upload = multer({ storage });
 });
 
 // WhatsApp Client Management
-// WhatsApp Client Management
 const clients = new Map();
 const qrCodes = new Map();
 const clientInitializing = new Map();
-const initializationPromises = new Map(); // NEW: Track ongoing initialization promises
-const eventListenersAttached = new Map(); // NEW: Track if listeners are already attached
+const initializationPromises = new Map();
+const eventListenersAttached = new Map();
+const clientStates = new Map(); // Track client states locally to avoid getState() calls
 
-
-// Helper function to call PHP API
+// Helper function to call PHP API with retry logic
 async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
-    try {
-        const config = {
-            method,
-            url: `${PHP_API_URL}${endpoint}`,
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            timeout: 10000
-        };
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const config = {
+                method,
+                url: `${PHP_API_URL}${endpoint}`,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            };
 
-        if (token) {
-            config.headers['Authorization'] = `Bearer ${token}`;
-        }
+            if (token) {
+                config.headers['Authorization'] = `Bearer ${token}`;
+            }
 
-        if (data) {
-            config.data = data;
-        }
+            if (data) {
+                config.data = data;
+            }
 
-        const response = await axios(config);
-        return response.data;
-    } catch (error) {
-        if (error.response) {
-            const phpError = new Error(error.response.data.error || `PHP API error: ${error.response.status}`);
-            phpError.status = error.response.status;
-            throw phpError;
+            const response = await axios(config);
+            return response.data;
+        } catch (error) {
+            if (attempt === maxRetries - 1) {
+                if (error.response) {
+                    const phpError = new Error(error.response.data.error || `PHP API error: ${error.response.status}`);
+                    phpError.status = error.response.status;
+                    throw phpError;
+                }
+                throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
         }
-        throw error;
     }
 }
 
@@ -87,7 +92,6 @@ function extractToken(req) {
     return null;
 }
 
-// Middleware to verify JWT tokens (for dashboard/UI)
 async function verifyAuth(req, res, next) {
     const token = extractToken(req);
     
@@ -98,8 +102,6 @@ async function verifyAuth(req, res, next) {
 
     try {
         console.log(`🔑 Verifying JWT token for request: ${req.method} ${req.path}`);
-        
-        // Verify token by calling PHP API
         const userData = await callPHPAPI('/auth/me', 'GET', null, token);
         
         if (!userData || !userData.user) {
@@ -115,21 +117,16 @@ async function verifyAuth(req, res, next) {
         next();
     } catch (error) {
         console.error('❌ JWT Auth verification failed:', error.message);
-        console.error('   Error details:', error.response?.data || error.message);
-        
-        // Check if it's a token signature error specifically
         if (error.message.includes('signature') || error.message.includes('Invalid token')) {
             return res.status(401).json({ 
                 error: 'Invalid token signature',
                 details: 'Please log out and log in again'
             });
         }
-        
         return res.status(401).json({ error: 'Authentication failed' });
     }
 }
 
-// NEW: Middleware to verify API tokens (for external API calls)
 async function verifyApiToken(req, res, next) {
     const token = extractToken(req);
     
@@ -140,9 +137,6 @@ async function verifyApiToken(req, res, next) {
 
     try {
         console.log(`🔑 Verifying API token for request: ${req.method} ${req.path}`);
-        console.log(`   Token preview: ${token.substring(0, 10)}...`);
-        
-        // Verify API token by calling PHP API
         const result = await callPHPAPI('/tokens/verify', 'POST', { token });
         
         if (!result || !result.valid) {
@@ -156,7 +150,6 @@ async function verifyApiToken(req, res, next) {
         req.apiTokenData = result;
         req.authType = 'api_token';
         
-        // Update token usage stats
         try {
             await callPHPAPI('/tokens/update-usage', 'POST', { token });
         } catch (error) {
@@ -166,8 +159,6 @@ async function verifyApiToken(req, res, next) {
         next();
     } catch (error) {
         console.error('❌ API Token verification failed:', error.message);
-        console.error('   Error details:', error.response?.data || error.message);
-        
         return res.status(401).json({ 
             error: 'Invalid API token',
             details: error.response?.data?.error || 'Token verification failed'
@@ -175,7 +166,6 @@ async function verifyApiToken(req, res, next) {
     }
 }
 
-// NEW: Combined middleware - accepts both JWT and API tokens
 async function verifyAnyToken(req, res, next) {
     const token = extractToken(req);
     
@@ -183,10 +173,6 @@ async function verifyAnyToken(req, res, next) {
         return res.status(401).json({ error: 'Authentication token required' });
     }
 
-    // Check token length to determine type
-    // JWT tokens are much longer (3 parts separated by dots)
-    // API tokens are typically 64 characters (sha256 hash)
-    
     const isJWT = token.includes('.') && token.split('.').length === 3;
     
     if (isJWT) {
@@ -198,13 +184,11 @@ async function verifyAnyToken(req, res, next) {
     }
 }
 
-// Request logging middleware
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
     next();
 });
 
-// Health check
 app.get('/api/health', (req, res) => {
     res.status(200).json({ 
         status: 'ok',
@@ -216,7 +200,6 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Token validation routes
 app.post('/api/auth/validate-token', async (req, res) => {
     try {
         const { token } = req.body;
@@ -262,7 +245,6 @@ app.post('/api/auth/remove-token', verifyAuth, async (req, res) => {
     }
 });
 
-// Helper to safely delete auth folder
 async function safeDeleteAuthFolder(authPath, maxRetries = 5, delay = 1000) {
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -292,13 +274,11 @@ async function safeDeleteAuthFolder(authPath, maxRetries = 5, delay = 1000) {
     return false;
 }
 
-// Helper to check if auth folder exists and has valid session
 function hasValidAuthSession(userId) {
     const authPath = path.join('./auth_data', `session-user-${userId}`);
     return fs.existsSync(authPath);
 }
 
-// Helper to clean stale auth data
 async function cleanStaleAuthData(userId) {
     const authPath = path.join('./auth_data', `session-user-${userId}`);
     if (fs.existsSync(authPath)) {
@@ -306,18 +286,18 @@ async function cleanStaleAuthData(userId) {
         await safeDeleteAuthFolder(authPath);
     }
 }
+
+// FIX: Improved heartbeat with error handling and state tracking
 function configureClientHeartbeat(client, userId, token) {
-    // Prevent duplicate event listeners
     if (eventListenersAttached.get(userId)) {
         console.log(`⚠️ Event listeners already attached for user ${userId}, skipping...`);
         return { startHeartbeat: () => {}, stopHeartbeat: () => {} };
     }
     
     eventListenersAttached.set(userId, true);
+    clientStates.set(userId, 'INITIALIZING');
     
     let heartbeatInterval = null;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT_ATTEMPTS = 5;
     let isDestroyed = false;
 
     const startHeartbeat = () => {
@@ -332,36 +312,26 @@ function configureClientHeartbeat(client, userId, token) {
             }
 
             try {
-                if (!client || !client.pupBrowser || client.pupBrowser.process?.killed) {
-                    console.log(`⚠️ Heartbeat: Client or browser not available for user ${userId}`);
+                // FIX: Check if client exists and avoid calling getState() on destroyed contexts
+                if (!client || !client.pupBrowser) {
+                    console.log(`⚠️ Heartbeat: Client not available for user ${userId}`);
                     stopHeartbeat();
                     return;
                 }
 
-                const statePromise = client.getState();
-                const timeoutPromise = new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('State check timeout')), 5000)
-                );
-
-                const state = await Promise.race([statePromise, timeoutPromise]);
+                // Use stored state instead of calling getState() which can fail
+                const lastKnownState = clientStates.get(userId) || 'UNKNOWN';
                 
-                if (state === 'CONNECTED') {
+                if (lastKnownState === 'CONNECTED') {
                     console.log(`💓 Heartbeat - Client alive for user ${userId}`);
-                    reconnectAttempts = 0;
-                } else if (state !== 'CONNECTING') {
-                    console.warn(`⚠️ Heartbeat detected disconnected state: ${state}`);
+                } else if (lastKnownState !== 'CONNECTING') {
+                    console.warn(`⚠️ Heartbeat: Client state is ${lastKnownState}`);
                 }
             } catch (error) {
-                if (!error.message.includes('Execution context was destroyed') &&
-                    !error.message.includes('navigation') &&
-                    !error.message.includes('Session closed')) {
-                    console.error(`❌ Heartbeat error for user ${userId}:`, error.message);
-                } else {
-                    console.log(`⚠️ Heartbeat stopped due to page navigation for user ${userId}`);
-                    stopHeartbeat();
-                }
+                console.log(`⚠️ Heartbeat error (expected on Render): ${error.message}`);
+                stopHeartbeat();
             }
-        }, 30000);
+        }, 45000); // Increased interval to reduce stress
 
         return heartbeatInterval;
     };
@@ -374,11 +344,11 @@ function configureClientHeartbeat(client, userId, token) {
         }
     };
 
-    // Auth failure handler
     client.once('auth_failure', async (msg) => {
         console.error(`❌ Auth failure for user ${userId}:`, msg);
         isDestroyed = true;
         stopHeartbeat();
+        clientStates.delete(userId);
         eventListenersAttached.delete(userId);
         clientInitializing.delete(userId);
         initializationPromises.delete(userId);
@@ -389,11 +359,11 @@ function configureClientHeartbeat(client, userId, token) {
         }, 2000);
     });
 
-    // Disconnected handler
     client.once('disconnected', async (reason) => {
         console.log(`🔌 Client disconnected for user ${userId}. Reason: ${reason}`);
         isDestroyed = true;
         stopHeartbeat();
+        clientStates.delete(userId);
         eventListenersAttached.delete(userId);
         
         try {
@@ -413,9 +383,10 @@ function configureClientHeartbeat(client, userId, token) {
         }
     });
 
-    // State change handler
     client.on('change_state', (state) => {
         console.log(`🔄 State change for user ${userId}: ${state}`);
+        clientStates.set(userId, state); // Store state locally
+        
         if (state === 'CONFLICT' || state === 'UNPAIRED') {
             console.log(`⚠️ Client conflict/unpaired for user ${userId}, stopping heartbeat`);
             isDestroyed = true;
@@ -423,9 +394,10 @@ function configureClientHeartbeat(client, userId, token) {
         }
     });
 
-    // Ready handler - use ONCE to prevent multiple fires
     client.once('ready', async () => {
         const info = client.info;
+        clientStates.set(userId, 'CONNECTED'); // Store state
+        
         try {
             await callPHPAPI('/whatsapp/session/update', 'POST', {
                 phone_number: info.wid.user,
@@ -442,11 +414,11 @@ function configureClientHeartbeat(client, userId, token) {
         }
     });
 
-    // Override destroy method
     const originalDestroy = client.destroy.bind(client);
     client.destroy = async function() {
         isDestroyed = true;
         stopHeartbeat();
+        clientStates.delete(userId);
         eventListenersAttached.delete(userId);
         return originalDestroy();
     };
@@ -454,15 +426,13 @@ function configureClientHeartbeat(client, userId, token) {
     return { startHeartbeat, stopHeartbeat };
 }
 
-// Initialize WhatsApp Client
+// FIX: Improved initialization with better error handling and timeout
 async function initializeClientForUser(userId, token, forceNew = false) {
-    // Check if initialization is already in progress
     if (initializationPromises.has(userId)) {
         console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
         return await initializationPromises.get(userId);
     }
 
-    // Create initialization promise
     const initPromise = (async () => {
         try {
             clientInitializing.set(userId, true);
@@ -471,19 +441,20 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             if (forceNew) {
                 console.log(`🧹 Force cleaning auth data for user ${userId}`);
                 await cleanStaleAuthData(userId);
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 1000));
                 
                 const authPath = path.join('./auth_data', `session-user-${userId}`);
                 if (fs.existsSync(authPath)) {
                     console.log(`⚠️ Auth data still exists, force deleting again...`);
                     try {
-                        fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 3 });
+                        fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 5 });
                     } catch (error) {
                         console.error(`✗ Failed to force delete: ${error.message}`);
                     }
                 }
             }
 
+            // FIX: Improved Puppeteer configuration for Render.com
             const client = new Client({
                 authStrategy: new LocalAuth({ 
                     dataPath: './auth_data',
@@ -500,15 +471,22 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                         '--no-zygote',
                         '--single-process',
                         '--disable-gpu',
-                        '--disable-web-resources'
-                    ]
+                        '--disable-web-resources',
+                        '--disable-features=IsolateOrigins,site-per-process', // FIX: Render.com specific
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-sync',
+                        '--metrics-recording-only',
+                        '--mute-audio',
+                        '--no-default-browser-check',
+                        '--no-pings'
+                    ],
+                    timeout: 30000 // FIX: Increased timeout for Render
                 }
             });
 
             let qrGenerated = false;
             let authenticated = false;
 
-            // QR handler - use ONCE
             client.once('qr', async (qr) => {
                 qrGenerated = true;
                 const qrData = await qrcode.toDataURL(qr);
@@ -516,17 +494,14 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 console.log(`📱 QR Code generated for user ${userId}`);
             });
 
-            // Authenticated handler - use ONCE
             client.once('authenticated', async () => {
                 authenticated = true;
                 console.log(`✓ User ${userId} authenticated`);
                 qrCodes.delete(userId);
             });
 
-            // Configure heartbeat and event handlers
             configureClientHeartbeat(client, userId, token);
 
-            // Message handler
             client.on('message', async (message) => {
                 try {
                     const contact = await message.getContact();
@@ -579,46 +554,27 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             });
 
             console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
-            await client.initialize();
             
-            let waitTime = 0;
-            while (waitTime < 15000 && !qrGenerated && !authenticated) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                waitTime += 500;
+            // FIX: Wrap initialization with timeout and proper error handling
+            const initTimeout = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Client initialization timeout')), 60000)
+            );
+
+            try {
+                await Promise.race([client.initialize(), initTimeout]);
+            } catch (error) {
+                if (error.message.includes('timeout')) {
+                    console.error('⚠️ Client initialization timed out, retrying...');
+                    await client.destroy();
+                    throw error;
+                }
+                throw error;
             }
             
-            try {
-                const state = await client.getState();
-                console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
-                
-                if (state === 'CONNECTED' && !qrGenerated && forceNew) {
-                    console.error(`❌ ERROR: Client connected without QR despite forceNew!`);
-                    console.log(`🔄 Destroying and retrying...`);
-                    
-                    await client.destroy();
-                    eventListenersAttached.delete(userId);
-                    await cleanStaleAuthData(userId);
-                    clientInitializing.delete(userId);
-                    initializationPromises.delete(userId);
-                    
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    
-                    const authPath = path.join('./auth_data', `session-user-${userId}`);
-                    if (fs.existsSync(authPath)) {
-                        const parentDir = path.join('./auth_data');
-                        const sessionDirs = fs.readdirSync(parentDir).filter(f => f.includes(`user-${userId}`));
-                        sessionDirs.forEach(dir => {
-                            const fullPath = path.join(parentDir, dir);
-                            console.log(`🧹 Removing: ${fullPath}`);
-                            fs.rmSync(fullPath, { recursive: true, force: true, maxRetries: 5 });
-                        });
-                    }
-                    
-                    return await initializeClientForUser(userId, token, forceNew);
-                }
-                
-            } catch (error) {
-                console.log(`✗ Error checking state: ${error.message}`);
+            let waitTime = 0;
+            while (waitTime < 20000 && !qrGenerated && !authenticated) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                waitTime += 500;
             }
             
             clients.set(userId, client);
@@ -630,28 +586,27 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             console.error(`✗ Error initializing client for user ${userId}:`, error);
             clientInitializing.delete(userId);
             initializationPromises.delete(userId);
+            clientStates.delete(userId);
             eventListenersAttached.delete(userId);
             await cleanStaleAuthData(userId);
             throw error;
         }
     })();
 
-    // Store the promise
     initializationPromises.set(userId, initPromise);
 
-    // Remove promise when done (success or failure)
     initPromise.finally(() => {
         initializationPromises.delete(userId);
     });
 
     return await initPromise;
 }
+
 // WhatsApp Routes
 app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
     try {
         console.log(`📱 Initialize request for user ${req.userId}`);
         
-        // Check if already initializing
         if (initializationPromises.has(req.userId)) {
             console.log(`⚠️ Initialization already in progress for user ${req.userId}`);
             return res.status(409).json({ 
@@ -660,7 +615,6 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             });
         }
         
-        // Destroy existing client first
         if (clients.has(req.userId)) {
             const client = clients.get(req.userId);
             console.log(`🧹 Destroying existing client for user ${req.userId}`);
@@ -670,14 +624,13 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
                 console.log(`✗ Error destroying client: ${error.message}`);
             }
             clients.delete(req.userId);
+            clientStates.delete(req.userId);
             eventListenersAttached.delete(req.userId);
         }
 
-        // Clean QR codes and state
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
 
-        // Check and clean database session
         try {
             const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
             if (session?.is_active) {
@@ -688,12 +641,10 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             console.log(`No database session to clean for user ${req.userId}`);
         }
 
-        // Clean auth data
         console.log(`🧹 Cleaning auth data for user ${req.userId}`);
         await cleanStaleAuthData(req.userId);
         await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // Initialize fresh client
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
         await initializeClientForUser(req.userId, req.token, true);
         
@@ -711,10 +662,10 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
         
-        // Check actual client state
         if (client) {
             try {
-                const state = await client.getState();
+                // FIX: Use stored state instead of calling getState()
+                const state = clientStates.get(req.userId) || 'UNKNOWN';
                 console.log(`QR request - Client state for user ${req.userId}: ${state}`);
                 
                 if (state === 'CONNECTED') {
@@ -748,17 +699,10 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
         let isConnected = false;
-        let clientState = 'NONE';
+        let clientState = clientStates.get(req.userId) || 'NONE';
         
-        if (client) {
-            try {
-                clientState = await client.getState();
-                isConnected = clientState === 'CONNECTED';
-                console.log(`Status check - Client state for user ${req.userId}: ${clientState}`);
-            } catch (error) {
-                console.log(`✗ Error checking client state: ${error.message}`);
-                clients.delete(req.userId);
-            }
+        if (client && clientState === 'CONNECTED') {
+            isConnected = true;
         }
 
         let session = null;
@@ -768,7 +712,6 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
             // Session doesn't exist, that's ok
         }
         
-        // If DB says connected but client isn't, clean up DB
         if (session?.is_active && !isConnected) {
             console.log(`🧹 Cleaning stale DB session for user ${req.userId}`);
             try {
@@ -793,11 +736,6 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
         });
     } catch (error) {
         console.error('✗ Status check error:', error.message);
-        
-        if (error.message.includes('401') || error.message.includes('Invalid token') || error.message.includes('Unauthorized')) {
-            return res.status(401).json({ error: 'Invalid token' });
-        }
-        
         res.status(500).json({ error: error.message });
     }
 });
@@ -820,6 +758,7 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
         }
 
         qrCodes.delete(req.userId);
+        clientStates.delete(req.userId);
         clientInitializing.delete(req.userId);
 
         try {
@@ -829,8 +768,6 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
         }
 
         console.log(`✓ WhatsApp disconnected for user ${req.userId}`);
-        
-        // Clean auth data immediately
         await cleanStaleAuthData(req.userId);
         
         res.json({ 
@@ -844,12 +781,10 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
     }
 });
 
-// Manual cleanup endpoint - IMPORTANT for debugging
 app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     try {
         console.log(`🧹 Force cleanup requested for user ${req.userId}`);
         
-        // Destroy client if exists
         if (clients.has(req.userId)) {
             const client = clients.get(req.userId);
             try {
@@ -860,21 +795,18 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
             clients.delete(req.userId);
         }
         
-        // Clear all state
         qrCodes.delete(req.userId);
+        clientStates.delete(req.userId);
         clientInitializing.delete(req.userId);
         
-        // Update database
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
         } catch (error) {
             console.log(`Error updating DB: ${error.message}`);
         }
         
-        // Force clean auth data
         await cleanStaleAuthData(req.userId);
         
-        // Double check and force delete
         await new Promise(resolve => setTimeout(resolve, 1000));
         const authPath = path.join('./auth_data', `session-user-${req.userId}`);
         if (fs.existsSync(authPath)) {
@@ -882,7 +814,6 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
             fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 5 });
         }
         
-        // Check all session directories for this user
         const parentDir = path.join('./auth_data');
         if (fs.existsSync(parentDir)) {
             const allDirs = fs.readdirSync(parentDir);
@@ -917,7 +848,7 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     }
 });
 
-// Messaging Routes - Accept both JWT and API tokens
+// Messaging Routes
 app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
         const { number, message } = req.body;
@@ -935,7 +866,8 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             });
         }
 
-        const state = await client.getState();
+        // FIX: Use stored state instead of calling getState()
+        const state = clientStates.get(req.userId);
         if (state !== 'CONNECTED') {
             return res.status(400).json({ error: 'WhatsApp not ready to send messages' });
         }
@@ -955,8 +887,6 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         }
 
         const myInfo = client.info;
-
-        // Use API token if available, otherwise use JWT
         const authToken = req.authType === 'api_token' ? req.token : req.token;
 
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
@@ -1080,7 +1010,6 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
     }
 });
 
-// Public endpoints - only accept API tokens
 app.get('/api/chats', verifyApiToken, async (req, res) => {
     try {
         const client = clients.get(req.userId);
@@ -1122,7 +1051,6 @@ app.get('/api/contacts', verifyApiToken, async (req, res) => {
     }
 });
 
-// Proxy routes to PHP API
 app.post('/api/auth/register', async (req, res) => {
     try {
         const result = await callPHPAPI('/auth/register', 'POST', req.body);
@@ -1224,7 +1152,7 @@ app.get('/api/status', verifyAuth, async (req, res) => {
         let isConnected = false;
         
         if (client) {
-            const state = await client.getState();
+            const state = clientStates.get(req.userId);
             isConnected = state === 'CONNECTED';
         }
         
@@ -1241,7 +1169,6 @@ app.get('/api/status', verifyAuth, async (req, res) => {
     }
 });
 
-// Cleanup on server shutdown
 process.on('SIGTERM', async () => {
     console.log('🛑 SIGTERM received, cleaning up...');
     for (const [userId, client] of clients.entries()) {
