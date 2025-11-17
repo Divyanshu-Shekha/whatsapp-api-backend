@@ -305,14 +305,18 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 logger: Pino({ level: 'silent' }),
                 printQRInTerminal: true,
                 browser: ['Ubuntu', 'Chrome', '120.0.0.0'],
-                markOnlineOnConnect: true,
+                markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: true,
                 syncFullHistory: false,
                 defaultQueryTimeoutMs: 60000,
-                retryRequestDelayMs: 250,
-                maxRetries: 10,
+                retryRequestDelayMs: 1000,
+                maxRetries: 3,
                 connectTimeoutMs: 30000,
-                keepAliveIntervalMs: 30000
+                keepAliveIntervalMs: 10000,
+                emitOwnEvents: true,
+                fireInitQueries: true,
+                mobile: false,
+                txTimeout: 30000
             });
 
             console.log(`✅ Socket created`);
@@ -322,32 +326,31 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             console.log(`✅ Client stored in map`);
 
             // Set up connection update handler
-            let connectionResolve;
-            let connectionPromise = new Promise(resolve => {
-                connectionResolve = resolve;
-            });
+            let qrGenerated = false;
+            let connectionOpened = false;
 
             client.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr, isOnline } = update;
 
-                console.log(`\n[🔗 CONNECTION UPDATE]`);
+                console.log(`\n[🔗 CONNECTION UPDATE for user ${userId}]`);
                 console.log(`  Connection: ${connection}`);
                 console.log(`  QR Code: ${!!qr}`);
                 console.log(`  Online: ${isOnline}`);
+                console.log(`  Last Disconnect: ${lastDisconnect?.error?.message || 'None'}`);
                 
                 if (lastDisconnect?.error) {
                     console.log(`  Disconnect Reason: ${lastDisconnect.error.output?.statusCode}`);
                 }
 
                 // Handle QR code generation
-                if (qr) {
+                if (qr && !qrGenerated) {
                     try {
                         console.log(`\n🔲 QR CODE RECEIVED - Converting to Data URL...`);
                         const qrData = await QRCode.toDataURL(qr);
                         qrCodes.set(userId, qrData);
+                        qrGenerated = true;
                         console.log(`✅ QR CODE STORED SUCCESSFULLY for user ${userId}`);
                         console.log(`📊 QR Code Length: ${qrData.length} chars`);
-                        connectionResolve('qr_generated');
                     } catch (error) {
                         console.error('❌ Error converting QR to data URL:', error.message);
                     }
@@ -359,7 +362,9 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
                 if (connection === 'open') {
                     console.log(`\n🎉 CONNECTION OPENED for user ${userId}`);
+                    connectionOpened = true;
                     qrCodes.delete(userId);
+                    qrGenerated = false;
                     
                     try {
                         const userInfo = client.user;
@@ -377,10 +382,8 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                             
                             console.log(`✅ Session updated in database\n`);
                         }
-                        connectionResolve('connected');
                     } catch (error) {
                         console.error('❌ Error updating session:', error.message);
-                        connectionResolve('error');
                     }
                 }
 
@@ -406,7 +409,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                             console.error('❌ Error cleaning up after disconnect:', error.message);
                         }
                     }
-                    connectionResolve('disconnected');
                 }
             });
 
@@ -491,17 +493,32 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             clientInitializing.delete(userId);
 
-            // Wait for initial connection state with timeout
-            console.log(`⏳ Waiting for initial connection state (max 20 seconds)...`);
-            const result = await Promise.race([
-                connectionPromise,
-                new Promise(resolve => setTimeout(() => resolve('timeout'), 20000))
-            ]);
+            // Wait for QR generation with timeout
+            console.log(`⏳ Waiting for QR generation (max 15 seconds)...`);
+            let waitTime = 0;
+            const maxWait = 15000;
+            
+            while (waitTime < maxWait && !qrGenerated && !connectionOpened) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                waitTime += 500;
+                
+                if (waitTime % 5000 === 0) {
+                    console.log(`⏰ Still waiting for QR... ${waitTime/1000}s`);
+                }
+            }
 
-            console.log(`✅ Initialization result: ${result}`);
+            if (qrGenerated) {
+                console.log(`✅ QR Code generated successfully after ${waitTime}ms`);
+            } else if (connectionOpened) {
+                console.log(`✅ Connected successfully after ${waitTime}ms`);
+            } else {
+                console.log(`⚠️ Timeout waiting for QR/connection after ${waitTime}ms`);
+            }
+
+            console.log(`\n✅ INITIALIZATION COMPLETE FOR USER ${userId}`);
             console.log(`   QR Available: ${!!qrCodes.get(userId)}`);
             console.log(`   Connected: ${!!client.user}`);
-            console.log(`   User ID: ${userId}\n`);
+            console.log(`   Client Ready: ${!!client}\n`);
             
             return client;
         } catch (error) {
@@ -563,27 +580,23 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
-        await initializeClientForUser(req.userId, req.token, true);
+        const client = await initializeClientForUser(req.userId, req.token, true);
         
         const qr = qrCodes.get(req.userId);
+        const isConnected = client && client.user;
         
         console.log(`\n📊 INITIALIZATION RESULT FOR USER ${req.userId}:`);
         console.log(`   QR Code: ${qr ? '✅ AVAILABLE' : '❌ NOT AVAILABLE'}`);
+        console.log(`   Connected: ${isConnected ? '✅ YES' : '❌ NO'}`);
         console.log(`   Client in Map: ${clients.has(req.userId) ? '✅ YES' : '❌ NO'}`);
         
-        if (qr) {
-            res.json({ 
-                success: true, 
-                message: 'QR code generated successfully',
-                hasQR: true
-            });
-        } else {
-            res.json({ 
-                success: true, 
-                message: 'Client initialized, waiting for QR or connection',
-                hasQR: false
-            });
-        }
+        res.json({ 
+            success: true, 
+            message: qr ? 'QR code generated successfully' : (isConnected ? 'Already connected' : 'Waiting for connection'),
+            hasQR: !!qr,
+            isConnected: !!isConnected,
+            clientReady: !!client
+        });
     } catch (error) {
         console.error('✗ Initialize error:', error);
         res.status(500).json({ error: error.message });
@@ -597,11 +610,12 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
         
         console.log(`\n📱 QR request for user ${req.userId}:`);
         console.log(`   - Client exists: ${!!client}`);
+        console.log(`   - Client authenticated: ${!!(client?.user)}`);
         console.log(`   - QR code exists: ${!!qr}`);
         console.log(`   - All users with QR: ${Array.from(qrCodes.keys()).join(', ')}`);
         
         if (client && client.user) {
-            console.log(`   - Client is authenticated`);
+            console.log(`   - Client is authenticated - returning null QR`);
             try {
                 const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
                 return res.json({ 
@@ -611,6 +625,11 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
                 });
             } catch (error) {
                 console.log('Error fetching session:', error.message);
+                return res.json({ 
+                    qr: null, 
+                    ready: true,
+                    session: null
+                });
             }
         }
 
