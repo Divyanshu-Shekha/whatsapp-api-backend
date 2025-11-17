@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, isJidBroadcast } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, isJidBroadcast, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const multer = require('multer');
 const path = require('path');
@@ -44,7 +44,6 @@ const clients = new Map();
 const qrCodes = new Map();
 const clientInitializing = new Map();
 const initializationPromises = new Map();
-const eventListenersAttached = new Map();
 
 // Helper function to call PHP API
 async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
@@ -269,217 +268,7 @@ async function cleanStaleAuthData(userId) {
     }
 }
 
-// Configure client heartbeat
-function configureClientHeartbeat(client, userId, token) {
-    if (eventListenersAttached.get(userId)) {
-        console.log(`⚠️ Event listeners already attached for user ${userId}, skipping...`);
-        return { startHeartbeat: () => {}, stopHeartbeat: () => {} };
-    }
-    
-    eventListenersAttached.set(userId, true);
-    
-    let heartbeatInterval = null;
-    let isDestroyed = false;
-
-    const startHeartbeat = () => {
-        if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
-        }
-
-        heartbeatInterval = setInterval(async () => {
-            if (isDestroyed || !client) {
-                stopHeartbeat();
-                return;
-            }
-
-            try {
-                const state = client.ws?.readyState;
-                if (state === 1) { // OPEN
-                    console.log(`💓 Heartbeat - Client alive for user ${userId}`);
-                } else {
-                    console.warn(`⚠️ Heartbeat detected disconnected state`);
-                }
-            } catch (error) {
-                console.error(`❌ Heartbeat error for user ${userId}:`, error.message);
-                stopHeartbeat();
-            }
-        }, 30000);
-
-        return heartbeatInterval;
-    };
-
-    const stopHeartbeat = () => {
-        if (heartbeatInterval) {
-            clearInterval(heartbeatInterval);
-            heartbeatInterval = null;
-            console.log(`🛑 Heartbeat stopped for user ${userId}`);
-        }
-    };
-
-    // Connection update handler - FIXED: Proper QR code handling
-    client.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr, isOnline } = update;
-
-        console.log(`\n[🔗 CONNECTION UPDATE]`);
-        console.log(`  Connection: ${connection}`);
-        console.log(`  QR Code: ${!!qr}`);
-        console.log(`  Online: ${isOnline}`);
-        console.log(`  Disconnect: ${lastDisconnect?.error?.output?.statusCode}`);
-
-        // FIX: Proper QR code generation and storage
-        if (qr) {
-            try {
-                console.log(`\n🔲 QR CODE RECEIVED - Converting to Data URL...`);
-                const qrData = await QRCode.toDataURL(qr);
-                qrCodes.set(userId, qrData);
-                console.log(`✅ QR CODE STORED SUCCESSFULLY for user ${userId}`);
-                console.log(`📊 QR Codes Cache Size: ${qrCodes.size}`);
-                console.log(`📊 Cached Users: ${Array.from(qrCodes.keys()).join(', ')}\n`);
-            } catch (error) {
-                console.error('❌ Error converting QR to data URL:', error.message);
-            }
-        }
-
-        if (connection === 'connecting') {
-            console.log(`🔄 CONNECTING for user ${userId}...\n`);
-        }
-
-        if (connection === 'open') {
-            console.log(`\n✅ CONNECTION OPEN for user ${userId}`);
-            qrCodes.delete(userId);
-            
-            try {
-                const info = client.user;
-                if (info && info.id) {
-                    const phoneNumber = info.id.split(':')[0];
-                    console.log(`\n📞 Extracted Phone: ${phoneNumber}`);
-                    console.log(`👤 Push Name: ${info.name || info.pushname || 'N/A'}`);
-                    
-                    console.log(`\n📤 Updating session in database...`);
-                    const sessionResult = await callPHPAPI('/whatsapp/session/update', 'POST', {
-                        phone_number: phoneNumber,
-                        pushname: info.name || info.pushname || 'User',
-                        is_active: true
-                    }, token);
-                    
-                    console.log(`✅ Session updated in database`);
-                    
-                    if (!isDestroyed) {
-                        startHeartbeat();
-                        console.log(`✅ Heartbeat started for user ${userId}\n`);
-                    }
-                } else {
-                    console.log(`⚠️ Client.user is undefined or missing id\n`);
-                }
-            } catch (error) {
-                console.error('❌ Error updating session:', error.message, '\n');
-            }
-        }
-
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log(`\n🔌 CONNECTION CLOSED for user ${userId}`);
-            console.log(`   Should Reconnect: ${shouldReconnect}\n`);
-            
-            isDestroyed = true;
-            stopHeartbeat();
-            
-            if (!shouldReconnect) {
-                clients.delete(userId);
-                qrCodes.delete(userId);
-                clientInitializing.delete(userId);
-                initializationPromises.delete(userId);
-                eventListenersAttached.delete(userId);
-                
-                try {
-                    await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
-                    await cleanStaleAuthData(userId);
-                } catch (error) {
-                    console.error('❌ Error cleaning up after disconnect:', error.message);
-                }
-            }
-        }
-    });
-
-    // Messages handler
-    client.ev.on('messages.upsert', async (m) => {
-        const message = m.messages[0];
-        
-        if (!message.message || isJidBroadcast(message.key.remoteJid)) return;
-
-        try {
-            const contact = await client.getContactById(message.key.remoteJid);
-            const myInfo = client.user;
-
-            await callPHPAPI('/stats/update', 'POST', {
-                field: 'received',
-                increment: 1
-            }, token);
-
-            let hasMedia = false;
-            let mediaType = null;
-            let mediaUrl = null;
-            let messageBody = null;
-
-            // Extract message body
-            if (message.message.conversation) {
-                messageBody = message.message.conversation;
-            } else if (message.message.extendedTextMessage) {
-                messageBody = message.message.extendedTextMessage.text;
-            }
-
-            // Check for media
-            const mediaKeys = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'];
-            for (const key of mediaKeys) {
-                if (message.message[key]) {
-                    hasMedia = true;
-                    mediaType = key.replace('Message', '').toLowerCase();
-                    
-                    try {
-                        const buffer = await client.downloadMediaMessage(message);
-                        if (buffer) {
-                            const ext = key === 'documentMessage' ? 
-                                message.message[key].fileName.split('.').pop() : 
-                                mediaType;
-                            const filename = `${Date.now()}_${message.key.id}.${ext}`;
-                            const filepath = path.join('uploads', filename);
-                            fs.writeFileSync(filepath, buffer);
-                            mediaUrl = `/uploads/${filename}`;
-                        }
-                    } catch (mediaError) {
-                        console.error('✗ Error downloading media:', mediaError);
-                    }
-                    break;
-                }
-            }
-
-            const phoneNumber = message.key.remoteJid.split('@')[0];
-
-            await callPHPAPI('/messages/save', 'POST', {
-                message_id: message.key.id,
-                type: 'received',
-                from_number: phoneNumber,
-                from_name: contact?.name || contact?.pushname || phoneNumber,
-                to_number: myInfo.id.split(':')[0],
-                to_name: myInfo.name || myInfo.pushname || 'User',
-                message_body: messageBody,
-                has_media: hasMedia,
-                media_type: mediaType,
-                media_url: mediaUrl,
-                status: 'received',
-                timestamp: message.messageTimestamp
-            }, token);
-
-            console.log(`✓ Message saved for user ${userId}`);
-        } catch (error) {
-            console.error('✗ Error saving received message:', error);
-        }
-    });
-
-    return { startHeartbeat, stopHeartbeat };
-}
-
-// Initialize WhatsApp Client - FIXED VERSION
+// Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
     if (initializationPromises.has(userId)) {
         console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
@@ -494,7 +283,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             if (forceNew) {
                 console.log(`🧹 Cleaning auth data for user ${userId}...`);
                 await cleanStaleAuthData(userId);
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 1000));
                 console.log(`✅ Auth data cleaned`);
             }
 
@@ -504,63 +293,221 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             const { state, saveCreds } = await useMultiFileAuthState(authPath);
             console.log(`✅ Auth state loaded`);
 
+            // Fetch latest version
+            const { version } = await fetchLatestBaileysVersion();
+            console.log(`📦 Using Baileys version: ${version.join('.')}`);
+
             console.log(`📋 Creating socket...`);
+            
             const client = makeWASocket({
+                version,
                 auth: state,
                 logger: Pino({ level: 'silent' }),
-                printQRInTerminal: true, // Enable for debugging
-                browser: ['WhatsApp', 'Chrome', '120.0'],
-                defaultQueryTimeoutMs: 30000,
-                retryRequestDelayMs: 100,
-                maxRetries: 5
+                printQRInTerminal: true,
+                browser: ['Ubuntu', 'Chrome', '120.0.0.0'],
+                markOnlineOnConnect: true,
+                generateHighQualityLinkPreview: true,
+                syncFullHistory: false,
+                defaultQueryTimeoutMs: 60000,
+                retryRequestDelayMs: 250,
+                maxRetries: 10,
+                connectTimeoutMs: 30000,
+                keepAliveIntervalMs: 30000
             });
 
             console.log(`✅ Socket created`);
+
+            // Store client immediately
+            clients.set(userId, client);
+            console.log(`✅ Client stored in map`);
+
+            // Set up connection update handler
+            let connectionResolve;
+            let connectionPromise = new Promise(resolve => {
+                connectionResolve = resolve;
+            });
+
+            client.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr, isOnline } = update;
+
+                console.log(`\n[🔗 CONNECTION UPDATE]`);
+                console.log(`  Connection: ${connection}`);
+                console.log(`  QR Code: ${!!qr}`);
+                console.log(`  Online: ${isOnline}`);
+                
+                if (lastDisconnect?.error) {
+                    console.log(`  Disconnect Reason: ${lastDisconnect.error.output?.statusCode}`);
+                }
+
+                // Handle QR code generation
+                if (qr) {
+                    try {
+                        console.log(`\n🔲 QR CODE RECEIVED - Converting to Data URL...`);
+                        const qrData = await QRCode.toDataURL(qr);
+                        qrCodes.set(userId, qrData);
+                        console.log(`✅ QR CODE STORED SUCCESSFULLY for user ${userId}`);
+                        console.log(`📊 QR Code Length: ${qrData.length} chars`);
+                        connectionResolve('qr_generated');
+                    } catch (error) {
+                        console.error('❌ Error converting QR to data URL:', error.message);
+                    }
+                }
+
+                if (connection === 'connecting') {
+                    console.log(`🔄 CONNECTING for user ${userId}...\n`);
+                }
+
+                if (connection === 'open') {
+                    console.log(`\n🎉 CONNECTION OPENED for user ${userId}`);
+                    qrCodes.delete(userId);
+                    
+                    try {
+                        const userInfo = client.user;
+                        if (userInfo && userInfo.id) {
+                            const phoneNumber = userInfo.id.split(':')[0];
+                            console.log(`📞 Phone Number: ${phoneNumber}`);
+                            console.log(`👤 Push Name: ${userInfo.name || userInfo.pushname || 'User'}`);
+                            
+                            console.log(`📤 Updating session in database...`);
+                            await callPHPAPI('/whatsapp/session/update', 'POST', {
+                                phone_number: phoneNumber,
+                                pushname: userInfo.name || userInfo.pushname || 'User',
+                                is_active: true
+                            }, token);
+                            
+                            console.log(`✅ Session updated in database\n`);
+                        }
+                        connectionResolve('connected');
+                    } catch (error) {
+                        console.error('❌ Error updating session:', error.message);
+                        connectionResolve('error');
+                    }
+                }
+
+                if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                    
+                    console.log(`\n🔌 CONNECTION CLOSED for user ${userId}`);
+                    console.log(`   Status Code: ${statusCode}`);
+                    console.log(`   Should Reconnect: ${shouldReconnect}`);
+                    
+                    if (!shouldReconnect) {
+                        console.log(`🧹 Cleaning up disconnected client...`);
+                        clients.delete(userId);
+                        qrCodes.delete(userId);
+                        clientInitializing.delete(userId);
+                        initializationPromises.delete(userId);
+                        
+                        try {
+                            await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
+                            await cleanStaleAuthData(userId);
+                        } catch (error) {
+                            console.error('❌ Error cleaning up after disconnect:', error.message);
+                        }
+                    }
+                    connectionResolve('disconnected');
+                }
+            });
 
             // Save credentials on update
             client.ev.on('creds.update', saveCreds);
             console.log(`✅ Credentials listener attached`);
 
-            // Configure event listeners
-            console.log(`🔧 Configuring event listeners...`);
-            configureClientHeartbeat(client, userId, token);
-            console.log(`✅ Event listeners configured`);
+            // Messages handler
+            client.ev.on('messages.upsert', async (m) => {
+                const message = m.messages[0];
+                
+                if (!message.message || message.key.fromMe || isJidBroadcast(message.key.remoteJid)) return;
 
-            // Store client
-            clients.set(userId, client);
-            console.log(`✅ Client stored in map`);
-            
+                try {
+                    const myInfo = client.user;
+
+                    await callPHPAPI('/stats/update', 'POST', {
+                        field: 'received',
+                        increment: 1
+                    }, token);
+
+                    let hasMedia = false;
+                    let mediaType = null;
+                    let mediaUrl = null;
+                    let messageBody = null;
+
+                    // Extract message body
+                    if (message.message.conversation) {
+                        messageBody = message.message.conversation;
+                    } else if (message.message.extendedTextMessage) {
+                        messageBody = message.message.extendedTextMessage.text;
+                    }
+
+                    // Check for media
+                    const mediaKeys = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'];
+                    for (const key of mediaKeys) {
+                        if (message.message[key]) {
+                            hasMedia = true;
+                            mediaType = key.replace('Message', '').toLowerCase();
+                            
+                            try {
+                                const buffer = await client.downloadMediaMessage(message);
+                                if (buffer) {
+                                    const ext = key === 'documentMessage' ? 
+                                        (message.message[key].fileName?.split('.').pop() || 'bin') : 
+                                        mediaType;
+                                    const filename = `${Date.now()}_${message.key.id}.${ext}`;
+                                    const filepath = path.join('uploads', filename);
+                                    fs.writeFileSync(filepath, buffer);
+                                    mediaUrl = `/uploads/${filename}`;
+                                }
+                            } catch (mediaError) {
+                                console.error('✗ Error downloading media:', mediaError);
+                            }
+                            break;
+                        }
+                    }
+
+                    const phoneNumber = message.key.remoteJid.split('@')[0];
+                    const myPhoneNumber = myInfo.id.split(':')[0];
+
+                    await callPHPAPI('/messages/save', 'POST', {
+                        message_id: message.key.id,
+                        type: 'received',
+                        from_number: phoneNumber,
+                        from_name: phoneNumber,
+                        to_number: myPhoneNumber,
+                        to_name: myInfo.name || myInfo.pushname || 'User',
+                        message_body: messageBody,
+                        has_media: hasMedia,
+                        media_type: mediaType,
+                        media_url: mediaUrl,
+                        status: 'received',
+                        timestamp: message.messageTimestamp
+                    }, token);
+
+                    console.log(`✓ Message saved for user ${userId}`);
+                } catch (error) {
+                    console.error('✗ Error saving received message:', error);
+                }
+            });
+
             clientInitializing.delete(userId);
 
-            // Wait for QR or connection
-            console.log(`⏳ Waiting for connection/QR (max 15 seconds)...`);
-            let waitTime = 0;
-            const maxWait = 15000;
-            
-            while (waitTime < maxWait) {
-                const qr = qrCodes.get(userId);
-                const isConnected = client.user && client.user.id;
-                
-                if (qr || isConnected) {
-                    console.log(`✅ QR/Connection available after ${waitTime}ms`);
-                    break;
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 500));
-                waitTime += 500;
-            }
+            // Wait for initial connection state with timeout
+            console.log(`⏳ Waiting for initial connection state (max 20 seconds)...`);
+            const result = await Promise.race([
+                connectionPromise,
+                new Promise(resolve => setTimeout(() => resolve('timeout'), 20000))
+            ]);
 
-            console.log(`✅ INITIALIZATION COMPLETE`);
+            console.log(`✅ Initialization result: ${result}`);
             console.log(`   QR Available: ${!!qrCodes.get(userId)}`);
             console.log(`   Connected: ${!!client.user}`);
             console.log(`   User ID: ${userId}\n`);
             
             return client;
         } catch (error) {
-            console.error(`❌ Error initializing client for user ${userId}:`, error.message);
+            console.error(`\n❌ Error initializing client for user ${userId}:`, error.message);
             clientInitializing.delete(userId);
             initializationPromises.delete(userId);
-            eventListenersAttached.delete(userId);
             await cleanStaleAuthData(userId);
             throw error;
         }
@@ -588,13 +535,14 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             });
         }
         
+        // Clean up existing client
         if (clients.has(req.userId)) {
             const client = clients.get(req.userId);
             console.log(`🧹 Destroying existing client for user ${req.userId}`);
             try {
                 client.ev.removeAllListeners();
             } catch (error) {
-                console.log(`✗ Error destroying client: ${error.message}`);
+                console.log(`⚠️ Error cleaning client: ${error.message}`);
             }
             clients.delete(req.userId);
         }
@@ -602,16 +550,14 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
 
+        // Clean database session
         try {
-            const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
-            if (session?.is_active) {
-                console.log(`🧹 Cleaning database session for user ${req.userId}`);
-                await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
-            }
+            await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
         } catch (error) {
             console.log(`No database session to clean for user ${req.userId}`);
         }
 
+        // Clean auth data
         console.log(`🧹 Cleaning auth data for user ${req.userId}`);
         await cleanStaleAuthData(req.userId);
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -620,22 +566,24 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         await initializeClientForUser(req.userId, req.token, true);
         
         const qr = qrCodes.get(req.userId);
-        const client = clients.get(req.userId);
-        const isConnected = client && client.user;
         
         console.log(`\n📊 INITIALIZATION RESULT FOR USER ${req.userId}:`);
-        console.log(`   QR Code: ${qr ? 'AVAILABLE' : 'NOT AVAILABLE'}`);
-        console.log(`   Connected: ${isConnected}`);
-        console.log(`   Client in Map: ${clients.has(req.userId)}`);
+        console.log(`   QR Code: ${qr ? '✅ AVAILABLE' : '❌ NOT AVAILABLE'}`);
+        console.log(`   Client in Map: ${clients.has(req.userId) ? '✅ YES' : '❌ NO'}`);
         
-        res.json({ 
-            success: true, 
-            message: qr ? 'QR code ready, please scan' : 'Awaiting connection or QR code',
-            userId: req.userId,
-            hasQR: !!qr,
-            isConnected: !!isConnected,
-            clientReady: !!client
-        });
+        if (qr) {
+            res.json({ 
+                success: true, 
+                message: 'QR code generated successfully',
+                hasQR: true
+            });
+        } else {
+            res.json({ 
+                success: true, 
+                message: 'Client initialized, waiting for QR or connection',
+                hasQR: false
+            });
+        }
     } catch (error) {
         console.error('✗ Initialize error:', error);
         res.status(500).json({ error: error.message });
@@ -647,19 +595,29 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
         const client = clients.get(req.userId);
         const qr = qrCodes.get(req.userId);
         
-        console.log(`📱 QR request for user ${req.userId}:`);
+        console.log(`\n📱 QR request for user ${req.userId}:`);
         console.log(`   - Client exists: ${!!client}`);
-        console.log(`   - Client authenticated: ${!!(client?.user)}`);
         console.log(`   - QR code exists: ${!!qr}`);
-        console.log(`   - Available QR codes: ${Array.from(qrCodes.keys())}`);
+        console.log(`   - All users with QR: ${Array.from(qrCodes.keys()).join(', ')}`);
         
         if (client && client.user) {
-            const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
-            return res.json({ 
-                qr: null, 
-                ready: true, 
-                session 
-            });
+            console.log(`   - Client is authenticated`);
+            try {
+                const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
+                return res.json({ 
+                    qr: null, 
+                    ready: true, 
+                    session 
+                });
+            } catch (error) {
+                console.log('Error fetching session:', error.message);
+            }
+        }
+
+        if (qr) {
+            console.log(`   ✅ Returning QR code of length: ${qr.length}`);
+        } else {
+            console.log(`   ❌ No QR code available`);
         }
 
         res.json({ 
@@ -680,7 +638,7 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
         let clientState = 'NONE';
         
         if (client) {
-            isConnected = client.user && client.ws?.readyState === 1;
+            isConnected = !!client.user;
             clientState = isConnected ? 'CONNECTED' : 'DISCONNECTED';
             console.log(`Status check - Client state for user ${req.userId}: ${clientState}`);
         }
@@ -690,22 +648,6 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
             session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
         } catch (error) {
             // Session doesn't exist
-        }
-        
-        if (session?.is_active && !isConnected) {
-            console.log(`🧹 Cleaning stale DB session for user ${req.userId}`);
-            try {
-                await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
-            } catch (error) {
-                console.error('✗ Error cleaning stale session:', error);
-            }
-            
-            return res.json({
-                connected: false,
-                session: null,
-                clientActive: false,
-                clientState
-            });
         }
         
         res.json({
@@ -738,7 +680,6 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
 
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
-        eventListenersAttached.delete(req.userId);
 
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
@@ -775,7 +716,6 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
         
         qrCodes.delete(req.userId);
         clientInitializing.delete(req.userId);
-        eventListenersAttached.delete(req.userId);
         
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
@@ -1124,7 +1064,7 @@ app.get('/api/status', verifyAuth, async (req, res) => {
         let isConnected = false;
         
         if (client) {
-            isConnected = client.user && client.ws?.readyState === 1;
+            isConnected = !!client.user;
         }
         
         const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
