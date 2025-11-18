@@ -42,10 +42,13 @@ const upload = multer({ storage });
 // Client Management - Enhanced
 const clients = new Map();
 const qrCodes = new Map();
-const qrTimestamps = new Map(); // Track QR generation time
+const qrTimestamps = new Map();
 const clientInitializing = new Map();
 const initializationPromises = new Map();
-const connectionStates = new Map(); // Track connection states
+const connectionStates = new Map();
+
+// INCREASE QR EXPIRATION TO 120 SECONDS (2 MINUTES)
+const QR_EXPIRATION_TIME = 120000; // 120 seconds instead of 20
 
 // Helper function to call PHP API
 async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
@@ -291,7 +294,7 @@ function cleanupClient(userId) {
     clientInitializing.delete(userId);
 }
 
-// Initialize WhatsApp Client - FIXED VERSION
+// Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
     if (initializationPromises.has(userId)) {
         console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
@@ -332,7 +335,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 version,
                 auth: state,
                 logger: Pino({ level: 'silent' }),
-                printQRInTerminal: false, // Disable console QR
+                printQRInTerminal: false,
                 browser: ['WhatsApp API', 'Chrome', '120.0.0.0'],
                 markOnlineOnConnect: true,
                 generateHighQualityLinkPreview: true,
@@ -359,7 +362,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             // Set up connection update handler
             let qrGenerationCount = 0;
-            const MAX_QR_GENERATIONS = 3;
+            const MAX_QR_GENERATIONS = 10; // INCREASED FROM 3 TO 10
 
             client.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr, isOnline } = update;
@@ -374,7 +377,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                     console.log(`  Error Message: ${lastDisconnect.error.message}`);
                 }
 
-                // Handle QR code generation with expiration tracking
+                // Handle QR code generation with extended expiration
                 if (qr) {
                     qrGenerationCount++;
                     console.log(`\n🔲 QR CODE RECEIVED (Generation #${qrGenerationCount}/${MAX_QR_GENERATIONS})`);
@@ -383,7 +386,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                         console.log(`⚠️ Max QR generations reached, restarting connection...`);
                         cleanupClient(userId);
                         await new Promise(resolve => setTimeout(resolve, 2000));
-                        // Don't auto-restart, let user manually restart
                         return;
                     }
                     
@@ -392,20 +394,20 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                         qrCodes.set(userId, qrData);
                         qrTimestamps.set(userId, Date.now());
                         connectionStates.set(userId, 'qr_ready');
-                        console.log(`✅ QR CODE STORED - Expires in ~20 seconds`);
+                        console.log(`✅ QR CODE STORED - Expires in ${QR_EXPIRATION_TIME/1000} seconds`);
                         console.log(`📊 QR Code Length: ${qrData.length} chars`);
                         
-                        // Set QR expiration timer
+                        // Set QR expiration timer with EXTENDED TIME
                         setTimeout(() => {
                             const currentQrTime = qrTimestamps.get(userId);
-                            if (currentQrTime && Date.now() - currentQrTime >= 20000) {
+                            if (currentQrTime && Date.now() - currentQrTime >= QR_EXPIRATION_TIME) {
                                 console.log(`⏰ QR Code expired for user ${userId}`);
                                 if (connectionStates.get(userId) !== 'connected') {
                                     qrCodes.delete(userId);
                                     connectionStates.set(userId, 'qr_expired');
                                 }
                             }
-                        }, 20000);
+                        }, QR_EXPIRATION_TIME);
                     } catch (error) {
                         console.error('❌ Error converting QR to data URL:', error.message);
                     }
@@ -468,7 +470,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                         }
                     } else if (shouldReconnect) {
                         console.log(`🔄 Attempting to reconnect...`);
-                        // Let Baileys handle reconnection automatically
                     } else {
                         cleanupClient(userId);
                         initializationPromises.delete(userId);
@@ -625,17 +626,14 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             });
         }
         
-        // Clean up existing client
         cleanupClient(req.userId);
 
-        // Clean database session
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
         } catch (error) {
             console.log(`No database session to clean for user ${req.userId}`);
         }
 
-        // Clean auth data
         console.log(`🧹 Cleaning auth data for user ${req.userId}`);
         await cleanStaleAuthData(req.userId);
         await new Promise(resolve => setTimeout(resolve, 1500));
@@ -679,10 +677,10 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
         console.log(`   - Connection state: ${state}`);
         console.log(`   - QR code exists: ${!!qr}`);
         
-        // Check QR expiration
+        // Check QR expiration with EXTENDED TIME
         if (qr && qrTimestamp) {
             const age = Date.now() - qrTimestamp;
-            if (age > 20000) {
+            if (age > QR_EXPIRATION_TIME) {
                 console.log(`   - QR expired (age: ${age}ms), clearing...`);
                 qrCodes.delete(req.userId);
                 qrTimestamps.delete(req.userId);
@@ -694,7 +692,7 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
                     state: state
                 });
             }
-            console.log(`   - QR age: ${age}ms (valid)`);
+            console.log(`   - QR age: ${age}ms (expires in ${QR_EXPIRATION_TIME - age}ms)`);
         }
         
         if (client && client.user) {
@@ -765,7 +763,7 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
             clientActive: isConnected,
             clientState: clientState,
             hasQR: qrCodes.has(req.userId),
-            qrExpired: qrTimestamps.has(req.userId) && (Date.now() - qrTimestamps.get(req.userId)) > 20000
+            qrExpired: qrTimestamps.has(req.userId) && (Date.now() - qrTimestamps.get(req.userId)) > QR_EXPIRATION_TIME
         });
     } catch (error) {
         console.error('✗ Status check error:', error.message);
@@ -1199,7 +1197,7 @@ app.get('/api/status', verifyAuth, async (req, res) => {
 setInterval(() => {
     const now = Date.now();
     for (const [userId, timestamp] of qrTimestamps.entries()) {
-        if (now - timestamp > 60000) { // 60 seconds
+        if (now - timestamp > (QR_EXPIRATION_TIME + 30000)) { // 30 seconds after expiration
             const state = connectionStates.get(userId);
             if (state !== 'connected') {
                 console.log(`🧹 Cleaning up stale QR for user ${userId}`);
@@ -1208,7 +1206,7 @@ setInterval(() => {
             }
         }
     }
-}, 30000); // Check every 30 seconds
+}, 30000);
 
 // Cleanup on server shutdown
 process.on('SIGTERM', async () => {
@@ -1244,5 +1242,6 @@ app.listen(PORT, () => {
     console.log(`✓ Environment: ${NODE_ENV}`);
     console.log(`✓ PHP API URL: ${PHP_API_URL}`);
     console.log(`✓ Frontend URL: ${FRONTEND_URL}`);
+    console.log(`✓ QR Expiration Time: ${QR_EXPIRATION_TIME/1000} seconds`);
     console.log(`✓ Server ready to accept connections`);
 });
