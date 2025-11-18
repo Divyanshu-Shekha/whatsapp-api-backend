@@ -334,25 +334,29 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             const client = makeWASocket({
                 version,
                 auth: state,
-                logger: Pino({ level: 'silent' }),
+                logger: Pino({ level: 'debug' }),
                 printQRInTerminal: false,
-                browser: ['WhatsApp API', 'Chrome', '120.0.0.0'],
-                markOnlineOnConnect: true,
+                browser: ['Ubuntu', 'Chrome', '120.0.0.0'],
+                markOnlineOnConnect: false,
                 generateHighQualityLinkPreview: false,
                 syncFullHistory: false,
                 defaultQueryTimeoutMs: 60000,
                 retryRequestDelayMs: 2000,
-                maxRetries: 5,
-                connectTimeoutMs: 60000,
+                maxRetries: 10,
+                connectTimeoutMs: 120000,
                 keepAliveIntervalMs: 30000,
                 emitOwnEvents: true,
                 fireInitQueries: false,
                 mobile: false,
                 readReceipts: false,
                 downloadHistory: false,
+                shouldIgnoreJid: (jid) => false,
                 getMessage: async (key) => {
                     return { conversation: '' };
-                }
+                },
+                qrTimeout: 60000,
+                transactionTimeout: 120000,
+                shouldSyncHistoryMessage: () => false
             });
 
             console.log(`✅ Socket created`);
@@ -366,6 +370,11 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             let qrGenerationCount = 0;
             const MAX_QR_GENERATIONS = 10;
             let connectionEventFired = false;
+
+            // Add error handler
+            client.ev.on('error', (error) => {
+                console.error(`🔴 CLIENT ERROR for user ${userId}:`, error.message);
+            });
 
             client.ev.on('connection.update', async (update) => {
                 connectionEventFired = true;
@@ -487,6 +496,20 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             client.ev.on('creds.update', saveCreds);
             console.log(`✅ Credentials listener attached`);
 
+            // Add socket event listeners for debugging
+            if (client.ws) {
+                console.log(`📡 WebSocket listeners attached`);
+                client.ws.on('open', () => {
+                    console.log(`✅ WebSocket OPEN for user ${userId}`);
+                });
+                client.ws.on('close', () => {
+                    console.log(`🔌 WebSocket CLOSE for user ${userId}`);
+                });
+                client.ws.on('error', (error) => {
+                    console.error(`🔴 WebSocket ERROR for user ${userId}:`, error.message);
+                });
+            }
+
             // Messages handler
             client.ev.on('messages.upsert', async (m) => {
                 const message = m.messages[0];
@@ -565,46 +588,71 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             clientInitializing.delete(userId);
 
-            // Give Baileys time to fire initial connection events
-            console.log(`⏳ Allowing Baileys to initialize (2 seconds)...`);
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Give Baileys time to initialize
+            console.log(`⏳ Allowing Baileys to initialize (3 seconds)...`);
+            await new Promise(resolve => setTimeout(resolve, 3000));
 
-            // Wait for initial connection state
-            console.log(`⏳ Waiting for connection event response (max 30 seconds)...`);
+            // Check if socket is actually connected
+            const isSocketConnected = () => {
+                if (!client.ws) return false;
+                const readyState = client.ws.readyState;
+                return readyState === 1 || readyState === 0; // OPEN or CONNECTING
+            };
+
+            console.log(`📡 Socket readyState: ${client.ws?.readyState}`);
+            console.log(`📡 Socket connected: ${isSocketConnected()}`);
+            console.log(`📡 Connection event fired: ${connectionEventFired}`);
+
+            // Wait for QR code or connection
+            console.log(`⏳ Waiting for QR code or connection (max 40 seconds)...`);
             let waitTime = 0;
-            const maxWait = 30000;
+            const maxWait = 40000;
             
             while (waitTime < maxWait) {
+                const qr = qrCodes.get(userId);
                 const state = connectionStates.get(userId);
                 
-                if (state === 'connected') {
-                    console.log(`✅ Connected successfully after ${waitTime}ms`);
-                    break;
-                } else if (state === 'qr_ready') {
+                // Check if we have QR
+                if (qr && state === 'qr_ready') {
                     console.log(`✅ QR Code ready after ${waitTime}ms`);
                     break;
-                } else if (state === 'disconnected' && connectionEventFired) {
-                    console.log(`⚠️ Disconnected after ${waitTime}ms, but connection event fired`);
+                }
+                
+                // Check if connected
+                if (state === 'connected' && client.user) {
+                    console.log(`✅ Connected successfully after ${waitTime}ms`);
                     break;
-                } else if (state === 'disconnected' && !connectionEventFired) {
-                    console.log(`⚠️ State is disconnected but no connection event fired yet - continuing wait...`);
+                }
+                
+                // If socket died, break
+                if (!isSocketConnected() && connectionEventFired) {
+                    console.log(`⚠️ Socket disconnected after ${waitTime}ms`);
+                    break;
                 }
                 
                 await new Promise(resolve => setTimeout(resolve, 500));
                 waitTime += 500;
                 
                 if (waitTime % 5000 === 0) {
-                    console.log(`⏰ Still waiting... ${waitTime/1000}s (State: ${state}, Event Fired: ${connectionEventFired})`);
+                    console.log(`⏰ Waiting ${waitTime/1000}s... State: ${state}, QR: ${!!qr}, Socket: ${isSocketConnected()}, Event: ${connectionEventFired}`);
                 }
             }
 
             const finalState = connectionStates.get(userId);
+            const finalQR = qrCodes.get(userId);
             console.log(`\n✅ INITIALIZATION COMPLETE FOR USER ${userId}`);
             console.log(`   Connection State: ${finalState}`);
             console.log(`   Connection Event Fired: ${connectionEventFired}`);
-            console.log(`   QR Available: ${!!qrCodes.get(userId)}`);
-            console.log(`   Connected: ${!!client.user}`);
+            console.log(`   Socket Connected: ${isSocketConnected()}`);
+            console.log(`   QR Available: ${!!finalQR}`);
+            console.log(`   Client Authenticated: ${!!client.user}`);
             console.log(`   Client Ready: ${!!client}\n`);
+            
+            // If we don't have QR or connection after init, update state
+            if (!finalQR && !client.user && finalState === 'connecting') {
+                console.log(`⚠️ No QR and not connected - setting to qr_ready anyway for polling`);
+                connectionStates.set(userId, 'qr_ready');
+            }
             
             return client;
         } catch (error) {
