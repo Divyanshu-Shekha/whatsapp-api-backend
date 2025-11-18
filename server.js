@@ -39,11 +39,13 @@ const upload = multer({ storage });
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// Client Management
+// Client Management - Enhanced
 const clients = new Map();
 const qrCodes = new Map();
+const qrTimestamps = new Map(); // Track QR generation time
 const clientInitializing = new Map();
 const initializationPromises = new Map();
+const connectionStates = new Map(); // Track connection states
 
 // Helper function to call PHP API
 async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
@@ -268,7 +270,28 @@ async function cleanStaleAuthData(userId) {
     }
 }
 
-// Initialize WhatsApp Client
+// Cleanup client resources
+function cleanupClient(userId) {
+    console.log(`🧹 Cleaning up client resources for user ${userId}`);
+    
+    if (clients.has(userId)) {
+        const client = clients.get(userId);
+        try {
+            client.ev.removeAllListeners();
+            client.ws?.close();
+        } catch (error) {
+            console.error(`Error destroying client: ${error.message}`);
+        }
+        clients.delete(userId);
+    }
+    
+    qrCodes.delete(userId);
+    qrTimestamps.delete(userId);
+    connectionStates.delete(userId);
+    clientInitializing.delete(userId);
+}
+
+// Initialize WhatsApp Client - FIXED VERSION
 async function initializeClientForUser(userId, token, forceNew = false) {
     if (initializationPromises.has(userId)) {
         console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
@@ -280,11 +303,17 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             clientInitializing.set(userId, true);
             console.log(`\n🔄 INITIALIZING CLIENT FOR USER ${userId} (forceNew: ${forceNew})`);
 
-            if (forceNew) {
-                console.log(`🧹 Cleaning auth data for user ${userId}...`);
-                await cleanStaleAuthData(userId);
+            // Clean up existing client
+            if (clients.has(userId)) {
+                console.log(`🧹 Cleaning up existing client...`);
+                cleanupClient(userId);
                 await new Promise(resolve => setTimeout(resolve, 1000));
-                console.log(`✅ Auth data cleaned`);
+            }
+
+            if (forceNew) {
+                console.log(`🧹 Force cleaning auth data for user ${userId}...`);
+                await cleanStaleAuthData(userId);
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
 
             const authPath = `./auth_data/user-${userId}`;
@@ -303,31 +332,34 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 version,
                 auth: state,
                 logger: Pino({ level: 'silent' }),
-                printQRInTerminal: true,
-                browser: ['Ubuntu', 'Chrome', '120.0.0.0'],
-                markOnlineOnConnect: false,
+                printQRInTerminal: false, // Disable console QR
+                browser: ['WhatsApp API', 'Chrome', '120.0.0.0'],
+                markOnlineOnConnect: true,
                 generateHighQualityLinkPreview: true,
                 syncFullHistory: false,
                 defaultQueryTimeoutMs: 60000,
-                retryRequestDelayMs: 1000,
-                maxRetries: 3,
-                connectTimeoutMs: 30000,
-                keepAliveIntervalMs: 10000,
+                retryRequestDelayMs: 2000,
+                maxRetries: 5,
+                connectTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
                 emitOwnEvents: true,
                 fireInitQueries: true,
                 mobile: false,
-                txTimeout: 30000
+                getMessage: async (key) => {
+                    return { conversation: '' };
+                }
             });
 
             console.log(`✅ Socket created`);
 
             // Store client immediately
             clients.set(userId, client);
+            connectionStates.set(userId, 'connecting');
             console.log(`✅ Client stored in map`);
 
             // Set up connection update handler
-            let qrGenerated = false;
-            let connectionOpened = false;
+            let qrGenerationCount = 0;
+            const MAX_QR_GENERATIONS = 3;
 
             client.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr, isOnline } = update;
@@ -336,35 +368,60 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 console.log(`  Connection: ${connection}`);
                 console.log(`  QR Code: ${!!qr}`);
                 console.log(`  Online: ${isOnline}`);
-                console.log(`  Last Disconnect: ${lastDisconnect?.error?.message || 'None'}`);
                 
                 if (lastDisconnect?.error) {
                     console.log(`  Disconnect Reason: ${lastDisconnect.error.output?.statusCode}`);
+                    console.log(`  Error Message: ${lastDisconnect.error.message}`);
                 }
 
-                // Handle QR code generation
-                if (qr && !qrGenerated) {
+                // Handle QR code generation with expiration tracking
+                if (qr) {
+                    qrGenerationCount++;
+                    console.log(`\n🔲 QR CODE RECEIVED (Generation #${qrGenerationCount}/${MAX_QR_GENERATIONS})`);
+                    
+                    if (qrGenerationCount > MAX_QR_GENERATIONS) {
+                        console.log(`⚠️ Max QR generations reached, restarting connection...`);
+                        cleanupClient(userId);
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        // Don't auto-restart, let user manually restart
+                        return;
+                    }
+                    
                     try {
-                        console.log(`\n🔲 QR CODE RECEIVED - Converting to Data URL...`);
                         const qrData = await QRCode.toDataURL(qr);
                         qrCodes.set(userId, qrData);
-                        qrGenerated = true;
-                        console.log(`✅ QR CODE STORED SUCCESSFULLY for user ${userId}`);
+                        qrTimestamps.set(userId, Date.now());
+                        connectionStates.set(userId, 'qr_ready');
+                        console.log(`✅ QR CODE STORED - Expires in ~20 seconds`);
                         console.log(`📊 QR Code Length: ${qrData.length} chars`);
+                        
+                        // Set QR expiration timer
+                        setTimeout(() => {
+                            const currentQrTime = qrTimestamps.get(userId);
+                            if (currentQrTime && Date.now() - currentQrTime >= 20000) {
+                                console.log(`⏰ QR Code expired for user ${userId}`);
+                                if (connectionStates.get(userId) !== 'connected') {
+                                    qrCodes.delete(userId);
+                                    connectionStates.set(userId, 'qr_expired');
+                                }
+                            }
+                        }, 20000);
                     } catch (error) {
                         console.error('❌ Error converting QR to data URL:', error.message);
                     }
                 }
 
                 if (connection === 'connecting') {
-                    console.log(`🔄 CONNECTING for user ${userId}...\n`);
+                    console.log(`🔄 CONNECTING for user ${userId}...`);
+                    connectionStates.set(userId, 'connecting');
                 }
 
                 if (connection === 'open') {
                     console.log(`\n🎉 CONNECTION OPENED for user ${userId}`);
-                    connectionOpened = true;
+                    connectionStates.set(userId, 'connected');
                     qrCodes.delete(userId);
-                    qrGenerated = false;
+                    qrTimestamps.delete(userId);
+                    qrGenerationCount = 0;
                     
                     try {
                         const userInfo = client.user;
@@ -394,20 +451,27 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                     console.log(`\n🔌 CONNECTION CLOSED for user ${userId}`);
                     console.log(`   Status Code: ${statusCode}`);
                     console.log(`   Should Reconnect: ${shouldReconnect}`);
+                    console.log(`   Reason: ${DisconnectReason[statusCode] || 'Unknown'}`);
                     
-                    if (!shouldReconnect) {
-                        console.log(`🧹 Cleaning up disconnected client...`);
-                        clients.delete(userId);
-                        qrCodes.delete(userId);
-                        clientInitializing.delete(userId);
+                    connectionStates.set(userId, 'disconnected');
+                    
+                    if (statusCode === DisconnectReason.loggedOut) {
+                        console.log(`🚪 User logged out - cleaning all data`);
+                        cleanupClient(userId);
                         initializationPromises.delete(userId);
                         
                         try {
                             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
                             await cleanStaleAuthData(userId);
                         } catch (error) {
-                            console.error('❌ Error cleaning up after disconnect:', error.message);
+                            console.error('❌ Error cleaning up after logout:', error.message);
                         }
+                    } else if (shouldReconnect) {
+                        console.log(`🔄 Attempting to reconnect...`);
+                        // Let Baileys handle reconnection automatically
+                    } else {
+                        cleanupClient(userId);
+                        initializationPromises.delete(userId);
                     }
                 }
             });
@@ -424,6 +488,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
                 try {
                     const myInfo = client.user;
+                    if (!myInfo) return;
 
                     await callPHPAPI('/stats/update', 'POST', {
                         field: 'received',
@@ -493,29 +558,36 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             clientInitializing.delete(userId);
 
-            // Wait for QR generation with timeout
-            console.log(`⏳ Waiting for QR generation (max 15 seconds)...`);
+            // Wait for initial connection state
+            console.log(`⏳ Waiting for initial connection state (max 30 seconds)...`);
             let waitTime = 0;
-            const maxWait = 15000;
+            const maxWait = 30000;
             
-            while (waitTime < maxWait && !qrGenerated && !connectionOpened) {
+            while (waitTime < maxWait) {
+                const state = connectionStates.get(userId);
+                
+                if (state === 'connected') {
+                    console.log(`✅ Connected successfully after ${waitTime}ms`);
+                    break;
+                } else if (state === 'qr_ready') {
+                    console.log(`✅ QR Code ready after ${waitTime}ms`);
+                    break;
+                } else if (state === 'disconnected') {
+                    console.log(`⚠️ Disconnected after ${waitTime}ms`);
+                    break;
+                }
+                
                 await new Promise(resolve => setTimeout(resolve, 500));
                 waitTime += 500;
                 
                 if (waitTime % 5000 === 0) {
-                    console.log(`⏰ Still waiting for QR... ${waitTime/1000}s`);
+                    console.log(`⏰ Still waiting... ${waitTime/1000}s (State: ${state})`);
                 }
             }
 
-            if (qrGenerated) {
-                console.log(`✅ QR Code generated successfully after ${waitTime}ms`);
-            } else if (connectionOpened) {
-                console.log(`✅ Connected successfully after ${waitTime}ms`);
-            } else {
-                console.log(`⚠️ Timeout waiting for QR/connection after ${waitTime}ms`);
-            }
-
+            const finalState = connectionStates.get(userId);
             console.log(`\n✅ INITIALIZATION COMPLETE FOR USER ${userId}`);
+            console.log(`   Connection State: ${finalState}`);
             console.log(`   QR Available: ${!!qrCodes.get(userId)}`);
             console.log(`   Connected: ${!!client.user}`);
             console.log(`   Client Ready: ${!!client}\n`);
@@ -523,7 +595,8 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             return client;
         } catch (error) {
             console.error(`\n❌ Error initializing client for user ${userId}:`, error.message);
-            clientInitializing.delete(userId);
+            console.error(error.stack);
+            cleanupClient(userId);
             initializationPromises.delete(userId);
             await cleanStaleAuthData(userId);
             throw error;
@@ -553,19 +626,7 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         }
         
         // Clean up existing client
-        if (clients.has(req.userId)) {
-            const client = clients.get(req.userId);
-            console.log(`🧹 Destroying existing client for user ${req.userId}`);
-            try {
-                client.ev.removeAllListeners();
-            } catch (error) {
-                console.log(`⚠️ Error cleaning client: ${error.message}`);
-            }
-            clients.delete(req.userId);
-        }
-
-        qrCodes.delete(req.userId);
-        clientInitializing.delete(req.userId);
+        cleanupClient(req.userId);
 
         // Clean database session
         try {
@@ -577,24 +638,26 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         // Clean auth data
         console.log(`🧹 Cleaning auth data for user ${req.userId}`);
         await cleanStaleAuthData(req.userId);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
         const client = await initializeClientForUser(req.userId, req.token, true);
         
         const qr = qrCodes.get(req.userId);
         const isConnected = client && client.user;
+        const state = connectionStates.get(req.userId);
         
         console.log(`\n📊 INITIALIZATION RESULT FOR USER ${req.userId}:`);
+        console.log(`   State: ${state}`);
         console.log(`   QR Code: ${qr ? '✅ AVAILABLE' : '❌ NOT AVAILABLE'}`);
         console.log(`   Connected: ${isConnected ? '✅ YES' : '❌ NO'}`);
-        console.log(`   Client in Map: ${clients.has(req.userId) ? '✅ YES' : '❌ NO'}`);
         
         res.json({ 
             success: true, 
-            message: qr ? 'QR code generated successfully' : (isConnected ? 'Already connected' : 'Waiting for connection'),
+            message: qr ? 'QR code generated successfully' : (isConnected ? 'Already connected' : 'Initializing...'),
             hasQR: !!qr,
             isConnected: !!isConnected,
+            state: state,
             clientReady: !!client
         });
     } catch (error) {
@@ -607,28 +670,50 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
         const qr = qrCodes.get(req.userId);
+        const qrTimestamp = qrTimestamps.get(req.userId);
+        const state = connectionStates.get(req.userId);
         
         console.log(`\n📱 QR request for user ${req.userId}:`);
         console.log(`   - Client exists: ${!!client}`);
         console.log(`   - Client authenticated: ${!!(client?.user)}`);
+        console.log(`   - Connection state: ${state}`);
         console.log(`   - QR code exists: ${!!qr}`);
-        console.log(`   - All users with QR: ${Array.from(qrCodes.keys()).join(', ')}`);
+        
+        // Check QR expiration
+        if (qr && qrTimestamp) {
+            const age = Date.now() - qrTimestamp;
+            if (age > 20000) {
+                console.log(`   - QR expired (age: ${age}ms), clearing...`);
+                qrCodes.delete(req.userId);
+                qrTimestamps.delete(req.userId);
+                return res.json({ 
+                    qr: null, 
+                    ready: false,
+                    expired: true,
+                    message: 'QR code expired, please reinitialize',
+                    state: state
+                });
+            }
+            console.log(`   - QR age: ${age}ms (valid)`);
+        }
         
         if (client && client.user) {
-            console.log(`   - Client is authenticated - returning null QR`);
+            console.log(`   - Client is authenticated - returning connection status`);
             try {
                 const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
                 return res.json({ 
                     qr: null, 
                     ready: true, 
-                    session 
+                    session,
+                    state: 'connected'
                 });
             } catch (error) {
                 console.log('Error fetching session:', error.message);
                 return res.json({ 
                     qr: null, 
                     ready: true,
-                    session: null
+                    session: null,
+                    state: 'connected'
                 });
             }
         }
@@ -642,7 +727,8 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
         res.json({ 
             qr: qr || null, 
             ready: false,
-            session: null
+            session: null,
+            state: state || 'unknown'
         });
     } catch (error) {
         console.error('✗ QR fetch error:', error);
@@ -653,12 +739,16 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
 app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
+        const state = connectionStates.get(req.userId);
         let isConnected = false;
-        let clientState = 'NONE';
+        let clientState = state || 'NONE';
         
         if (client) {
             isConnected = !!client.user;
-            clientState = isConnected ? 'CONNECTED' : 'DISCONNECTED';
+            if (isConnected && clientState !== 'connected') {
+                clientState = 'connected';
+                connectionStates.set(req.userId, 'connected');
+            }
             console.log(`Status check - Client state for user ${req.userId}: ${clientState}`);
         }
 
@@ -673,7 +763,9 @@ app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
             connected: isConnected && session?.is_active,
             session: session || null,
             clientActive: isConnected,
-            clientState
+            clientState: clientState,
+            hasQR: qrCodes.has(req.userId),
+            qrExpired: qrTimestamps.has(req.userId) && (Date.now() - qrTimestamps.get(req.userId)) > 20000
         });
     } catch (error) {
         console.error('✗ Status check error:', error.message);
@@ -689,16 +781,14 @@ app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
         
         if (client) {
             try {
-                client.ev.removeAllListeners();
-                console.log(`✓ Client destroyed for user ${req.userId}`);
+                await client.logout();
+                console.log(`✓ Client logged out for user ${req.userId}`);
             } catch (error) {
-                console.error('✗ Error destroying client:', error.message);
+                console.error('✗ Error logging out client:', error.message);
             }
-            clients.delete(req.userId);
         }
 
-        qrCodes.delete(req.userId);
-        clientInitializing.delete(req.userId);
+        cleanupClient(req.userId);
 
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
@@ -723,18 +813,8 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     try {
         console.log(`🧹 Force cleanup requested for user ${req.userId}`);
         
-        if (clients.has(req.userId)) {
-            const client = clients.get(req.userId);
-            try {
-                client.ev.removeAllListeners();
-            } catch (error) {
-                console.log(`Error destroying client: ${error.message}`);
-            }
-            clients.delete(req.userId);
-        }
-        
-        qrCodes.delete(req.userId);
-        clientInitializing.delete(req.userId);
+        cleanupClient(req.userId);
+        initializationPromises.delete(req.userId);
         
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
@@ -759,7 +839,8 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
                 qrCode: true,
                 initializing: true,
                 database: true,
-                authData: true
+                authData: true,
+                state: true
             }
         });
     } catch (error) {
@@ -786,7 +867,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             });
         }
 
-        const jid = number.includes('@c.us') ? number : `${number}@c.us`;
+        const jid = number.includes('@') ? number : `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
         
         console.log(`📤 Sending message to ${jid} for user ${req.userId} (Auth: ${req.authType})`);
         const sentMessage = await client.sendMessage(jid, { text: message });
@@ -794,8 +875,10 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
 
         let contactName = number;
         try {
-            const contact = await client.getContactById(jid);
-            contactName = contact?.name || contact?.pushname || number;
+            const [result] = await client.onWhatsApp(jid);
+            if (result?.exists) {
+                contactName = result.notify || number;
+            }
         } catch (err) {
             console.log('Could not get contact name:', err.message);
         }
@@ -808,7 +891,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             type: 'sent',
             from_number: phoneNumber,
             from_name: myInfo.name || myInfo.pushname || 'User',
-            to_number: number,
+            to_number: number.replace(/[^0-9]/g, ''),
             to_name: contactName,
             message_body: message,
             has_media: false,
@@ -859,7 +942,7 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const jid = number.includes('@c.us') ? number : `${number}@c.us`;
+        const jid = number.includes('@') ? number : `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
         const mediaBuffer = fs.readFileSync(req.file.path);
         const mimetype = req.file.mimetype;
         
@@ -871,12 +954,17 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
 
         if (mimetype.startsWith('image')) {
             mediaMessage.image = mediaBuffer;
+            mediaMessage.mimetype = mimetype;
         } else if (mimetype.startsWith('video')) {
             mediaMessage.video = mediaBuffer;
+            mediaMessage.mimetype = mimetype;
         } else if (mimetype.startsWith('audio')) {
             mediaMessage.audio = mediaBuffer;
+            mediaMessage.mimetype = mimetype;
+            mediaMessage.ptt = false;
         } else {
             mediaMessage.document = mediaBuffer;
+            mediaMessage.mimetype = mimetype;
             mediaMessage.fileName = req.file.originalname;
         }
 
@@ -885,8 +973,10 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
 
         let contactName = number;
         try {
-            const contact = await client.getContactById(jid);
-            contactName = contact?.name || contact?.pushname || number;
+            const [result] = await client.onWhatsApp(jid);
+            if (result?.exists) {
+                contactName = result.notify || number;
+            }
         } catch (err) {
             console.log('Could not get contact name:', err.message);
         }
@@ -900,7 +990,7 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             type: 'sent',
             from_number: phoneNumber,
             from_name: myInfo.name || myInfo.pushname || 'User',
-            to_number: number,
+            to_number: number.replace(/[^0-9]/g, ''),
             to_name: contactName,
             message_body: caption || null,
             has_media: true,
@@ -925,7 +1015,11 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
         console.error('✗ Error sending media:', error);
         
         if (req.file && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
+            try {
+                fs.unlinkSync(req.file.path);
+            } catch (e) {
+                console.error('Error deleting uploaded file:', e.message);
+            }
         }
         
         try {
@@ -947,15 +1041,17 @@ app.get('/api/chats', verifyApiToken, async (req, res) => {
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const chats = await client.getAllChats();
+        const chats = await client.store?.chats?.all() || [];
         const chatList = chats.map(chat => ({
             id: chat.id,
-            name: chat.name,
-            isGroup: chat.isGroup,
-            unreadCount: chat.unreadCount || 0
+            name: chat.name || chat.id.split('@')[0],
+            isGroup: chat.id.endsWith('@g.us'),
+            unreadCount: chat.unreadCount || 0,
+            lastMessageTime: chat.conversationTimestamp || null
         }));
         res.json(chatList);
     } catch (error) {
+        console.error('Error fetching chats:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -967,16 +1063,16 @@ app.get('/api/contacts', verifyApiToken, async (req, res) => {
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const contacts = await client.contacts;
-        const contactList = Object.values(contacts)
-            .filter(c => !c.isGroup && c.id !== 'status@broadcast')
+        const contacts = Object.values(client.store?.contacts || {})
+            .filter(c => !c.id.endsWith('@g.us') && c.id !== 'status@broadcast')
             .map(c => ({
                 id: c.id,
-                name: c.name || c.pushname,
+                name: c.name || c.notify || c.verifiedName || c.id.split('@')[0],
                 number: c.id.split('@')[0]
             }));
-        res.json(contactList);
+        res.json(contacts);
     } catch (error) {
+        console.error('Error fetching contacts:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1099,12 +1195,28 @@ app.get('/api/status', verifyAuth, async (req, res) => {
     }
 });
 
+// Cleanup stale clients periodically
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, timestamp] of qrTimestamps.entries()) {
+        if (now - timestamp > 60000) { // 60 seconds
+            const state = connectionStates.get(userId);
+            if (state !== 'connected') {
+                console.log(`🧹 Cleaning up stale QR for user ${userId}`);
+                qrCodes.delete(userId);
+                qrTimestamps.delete(userId);
+            }
+        }
+    }
+}, 30000); // Check every 30 seconds
+
 // Cleanup on server shutdown
 process.on('SIGTERM', async () => {
     console.log('🛑 SIGTERM received, cleaning up...');
     for (const [userId, client] of clients.entries()) {
         try {
             client.ev.removeAllListeners();
+            client.ws?.close();
             console.log(`✓ Destroyed client for user ${userId}`);
         } catch (error) {
             console.error(`✗ Error destroying client for user ${userId}:`, error);
@@ -1118,6 +1230,7 @@ process.on('SIGINT', async () => {
     for (const [userId, client] of clients.entries()) {
         try {
             client.ev.removeAllListeners();
+            client.ws?.close();
             console.log(`✓ Destroyed client for user ${userId}`);
         } catch (error) {
             console.error(`✗ Error destroying client for user ${userId}:`, error);
