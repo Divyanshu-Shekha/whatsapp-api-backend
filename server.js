@@ -338,7 +338,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 printQRInTerminal: false,
                 browser: ['WhatsApp API', 'Chrome', '120.0.0.0'],
                 markOnlineOnConnect: true,
-                generateHighQualityLinkPreview: true,
+                generateHighQualityLinkPreview: false,
                 syncFullHistory: false,
                 defaultQueryTimeoutMs: 60000,
                 retryRequestDelayMs: 2000,
@@ -346,8 +346,10 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 connectTimeoutMs: 60000,
                 keepAliveIntervalMs: 30000,
                 emitOwnEvents: true,
-                fireInitQueries: true,
+                fireInitQueries: false,
                 mobile: false,
+                readReceipts: false,
+                downloadHistory: false,
                 getMessage: async (key) => {
                     return { conversation: '' };
                 }
@@ -360,11 +362,13 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             connectionStates.set(userId, 'connecting');
             console.log(`✅ Client stored in map`);
 
-            // Set up connection update handler
+            // Set up connection update handler FIRST before anything else
             let qrGenerationCount = 0;
-            const MAX_QR_GENERATIONS = 10; // INCREASED FROM 3 TO 10
+            const MAX_QR_GENERATIONS = 10;
+            let connectionEventFired = false;
 
             client.ev.on('connection.update', async (update) => {
+                connectionEventFired = true;
                 const { connection, lastDisconnect, qr, isOnline } = update;
 
                 console.log(`\n[🔗 CONNECTION UPDATE for user ${userId}]`);
@@ -416,6 +420,8 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 if (connection === 'connecting') {
                     console.log(`🔄 CONNECTING for user ${userId}...`);
                     connectionStates.set(userId, 'connecting');
+                    // Don't set to disconnected, keep trying
+                    return;
                 }
 
                 if (connection === 'open') {
@@ -559,8 +565,12 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
             clientInitializing.delete(userId);
 
+            // Give Baileys time to fire initial connection events
+            console.log(`⏳ Allowing Baileys to initialize (2 seconds)...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
             // Wait for initial connection state
-            console.log(`⏳ Waiting for initial connection state (max 30 seconds)...`);
+            console.log(`⏳ Waiting for connection event response (max 30 seconds)...`);
             let waitTime = 0;
             const maxWait = 30000;
             
@@ -573,22 +583,25 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 } else if (state === 'qr_ready') {
                     console.log(`✅ QR Code ready after ${waitTime}ms`);
                     break;
-                } else if (state === 'disconnected') {
-                    console.log(`⚠️ Disconnected after ${waitTime}ms`);
+                } else if (state === 'disconnected' && connectionEventFired) {
+                    console.log(`⚠️ Disconnected after ${waitTime}ms, but connection event fired`);
                     break;
+                } else if (state === 'disconnected' && !connectionEventFired) {
+                    console.log(`⚠️ State is disconnected but no connection event fired yet - continuing wait...`);
                 }
                 
                 await new Promise(resolve => setTimeout(resolve, 500));
                 waitTime += 500;
                 
                 if (waitTime % 5000 === 0) {
-                    console.log(`⏰ Still waiting... ${waitTime/1000}s (State: ${state})`);
+                    console.log(`⏰ Still waiting... ${waitTime/1000}s (State: ${state}, Event Fired: ${connectionEventFired})`);
                 }
             }
 
             const finalState = connectionStates.get(userId);
             console.log(`\n✅ INITIALIZATION COMPLETE FOR USER ${userId}`);
             console.log(`   Connection State: ${finalState}`);
+            console.log(`   Connection Event Fired: ${connectionEventFired}`);
             console.log(`   QR Available: ${!!qrCodes.get(userId)}`);
             console.log(`   Connected: ${!!client.user}`);
             console.log(`   Client Ready: ${!!client}\n`);
