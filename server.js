@@ -1,12 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, isJidBroadcast, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const QRCode = require('qrcode');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const qrcode = require('qrcode');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
-const Pino = require('pino');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -39,46 +38,90 @@ const upload = multer({ storage });
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// Client Management - Enhanced
+// WhatsApp Client Management
+// WhatsApp Client Management
 const clients = new Map();
 const qrCodes = new Map();
-const qrTimestamps = new Map();
 const clientInitializing = new Map();
-const initializationPromises = new Map();
-const connectionStates = new Map();
+const initializationPromises = new Map(); // NEW: Track ongoing initialization promises
+const eventListenersAttached = new Map(); // NEW: Track if listeners are already attached
 
-// INCREASE QR EXPIRATION TO 120 SECONDS (2 MINUTES)
-const QR_EXPIRATION_TIME = 120000; // 120 seconds instead of 20
+// Key improvements in server.js:
+
+// 1. Add token caching to reduce database calls
+const tokenCache = new Map();
+const TOKEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Helper to cache tokens
+function cacheToken(token, userData) {
+  tokenCache.set(token, {
+    data: userData,
+    timestamp: Date.now()
+  });
+  
+  // Clear cache after TTL
+  setTimeout(() => {
+    tokenCache.delete(token);
+  }, TOKEN_CACHE_TTL);
+}
+
+function getCachedToken(token) {
+  const cached = tokenCache.get(token);
+  if (!cached) return null;
+  
+  // Check if cache is still valid
+  if (Date.now() - cached.timestamp > TOKEN_CACHE_TTL) {
+    tokenCache.delete(token);
+    return null;
+  }
+  
+  return cached.data;
+}
+
 
 // Helper function to call PHP API
-async function callPHPAPI(endpoint, method = 'GET', data = null, token = null) {
-    try {
-        const config = {
-            method,
-            url: `${PHP_API_URL}${endpoint}`,
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            timeout: 10000
-        };
+async function callPHPAPI(endpoint, method = 'GET', data = null, token = null, retries = 2) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const config = {
+                method,
+                url: `${PHP_API_URL}${endpoint}`,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000 // Increased timeout
+            };
 
-        if (token) {
-            config.headers['Authorization'] = `Bearer ${token}`;
-        }
+            if (token) {
+                config.headers['Authorization'] = `Bearer ${token}`;
+            }
 
-        if (data) {
-            config.data = data;
-        }
+            if (data) {
+                config.data = data;
+            }
 
-        const response = await axios(config);
-        return response.data;
-    } catch (error) {
-        if (error.response) {
-            const phpError = new Error(error.response.data.error || `PHP API error: ${error.response.status}`);
-            phpError.status = error.response.status;
-            throw phpError;
+            const response = await axios(config);
+            return response.data;
+        } catch (error) {
+            // Don't retry on auth errors
+            if (error.response?.status === 401 || error.response?.status === 403) {
+                throw error;
+            }
+            
+            // Retry on network errors or 500s
+            if (attempt < retries && (!error.response || error.response.status >= 500)) {
+                console.log(`Retrying PHP API call (${attempt + 1}/${retries})...`);
+                await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+                continue;
+            }
+            
+            if (error.response) {
+                const phpError = new Error(error.response.data.error || `PHP API error: ${error.response.status}`);
+                phpError.status = error.response.status;
+                throw phpError;
+            }
+            throw error;
         }
-        throw error;
     }
 }
 
@@ -90,23 +133,45 @@ function extractToken(req) {
     return null;
 }
 
-// Middleware to verify JWT tokens
+// Middleware to verify JWT tokens (for dashboard/UI)
 async function verifyAuth(req, res, next) {
     const token = extractToken(req);
     
     if (!token) {
         console.error('❌ No token provided in request');
-        return res.status(401).json({ error: 'No token provided' });
+        return res.status(401).json({ 
+            error: 'No token provided',
+            code: 'NO_TOKEN'
+        });
     }
 
     try {
+        // Check cache first
+        const cachedData = getCachedToken(token);
+        if (cachedData) {
+            console.log(`✅ Using cached token data for user ${cachedData.user.id}`);
+            req.userId = cachedData.user.id;
+            req.token = token;
+            req.user = cachedData.user;
+            req.authType = 'jwt';
+            return next();
+        }
+        
         console.log(`🔑 Verifying JWT token for request: ${req.method} ${req.path}`);
+        
+        // Verify token by calling PHP API
         const userData = await callPHPAPI('/auth/me', 'GET', null, token);
         
         if (!userData || !userData.user) {
             console.error('❌ Invalid user data received from PHP API');
-            return res.status(401).json({ error: 'Invalid user data' });
+            return res.status(401).json({ 
+                error: 'Invalid user data',
+                code: 'INVALID_USER_DATA'
+            });
         }
+        
+        // Cache the token
+        cacheToken(token, userData);
         
         console.log(`✅ JWT Token verified for user ${userData.user.id} (${userData.user.email})`);
         req.userId = userData.user.id;
@@ -116,27 +181,74 @@ async function verifyAuth(req, res, next) {
         next();
     } catch (error) {
         console.error('❌ JWT Auth verification failed:', error.message);
-        return res.status(401).json({ error: 'Authentication failed' });
+        
+        // Clear token from cache on error
+        tokenCache.delete(token);
+        
+        // Provide specific error codes
+        if (error.message.includes('signature') || error.message.includes('Invalid token')) {
+            return res.status(401).json({ 
+                error: 'Invalid token signature',
+                code: 'INVALID_SIGNATURE',
+                details: 'Please log out and log in again'
+            });
+        }
+        
+        if (error.message.includes('expired') || error.message.includes('jwt expired')) {
+            return res.status(401).json({ 
+                error: 'Token expired',
+                code: 'TOKEN_EXPIRED',
+                details: 'Your session has expired. Please login again.'
+            });
+        }
+        
+        return res.status(401).json({ 
+            error: 'Authentication failed',
+            code: 'AUTH_FAILED'
+        });
     }
 }
 
-// Middleware to verify API tokens
+
+// NEW: Middleware to verify API tokens (for external API calls)
 async function verifyApiToken(req, res, next) {
     const token = extractToken(req);
     
     if (!token) {
         console.error('❌ No API token provided');
-        return res.status(401).json({ error: 'API token required' });
+        return res.status(401).json({ 
+            error: 'API token required',
+            code: 'NO_TOKEN'
+        });
     }
 
     try {
+        // Check cache first
+        const cachedData = getCachedToken(`api_${token}`);
+        if (cachedData) {
+            console.log(`✅ Using cached API token data for user ${cachedData.user_id}`);
+            req.userId = cachedData.user_id;
+            req.token = token;
+            req.apiTokenData = cachedData;
+            req.authType = 'api_token';
+            return next();
+        }
+        
         console.log(`🔑 Verifying API token for request: ${req.method} ${req.path}`);
+        
+        // Verify API token by calling PHP API
         const result = await callPHPAPI('/tokens/verify', 'POST', { token });
         
         if (!result || !result.valid) {
             console.error('❌ Invalid API token');
-            return res.status(401).json({ error: 'Invalid or expired API token' });
+            return res.status(401).json({ 
+                error: 'Invalid or expired API token',
+                code: 'INVALID_API_TOKEN'
+            });
         }
+        
+        // Cache the API token
+        cacheToken(`api_${token}`, result);
         
         console.log(`✅ API Token verified for user ${result.user_id}`);
         req.userId = result.user_id;
@@ -144,20 +256,62 @@ async function verifyApiToken(req, res, next) {
         req.apiTokenData = result;
         req.authType = 'api_token';
         
-        try {
-            await callPHPAPI('/tokens/update-usage', 'POST', { token });
-        } catch (error) {
-            console.error('Warning: Failed to update token usage:', error.message);
-        }
+        // Update token usage stats (async, don't wait)
+        callPHPAPI('/tokens/update-usage', 'POST', { token }).catch(err => {
+            console.error('Warning: Failed to update token usage:', err.message);
+        });
         
         next();
     } catch (error) {
         console.error('❌ API Token verification failed:', error.message);
-        return res.status(401).json({ error: 'Invalid API token' });
+        
+        // Clear from cache
+        tokenCache.delete(`api_${token}`);
+        
+        return res.status(401).json({ 
+            error: 'Invalid API token',
+            code: 'INVALID_API_TOKEN',
+            details: error.response?.data?.error || 'Token verification failed'
+        });
     }
 }
 
-// Combined middleware
+app.get('/api/auth/check-token', async (req, res) => {
+    try {
+        const token = extractToken(req);
+        
+        if (!token) {
+            return res.json({ valid: false, reason: 'NO_TOKEN' });
+        }
+        
+        // Check cache first
+        const cachedData = getCachedToken(token);
+        if (cachedData) {
+            return res.json({ 
+                valid: true, 
+                user: cachedData.user,
+                cached: true 
+            });
+        }
+        
+        // Verify with PHP API
+        const result = await callPHPAPI('/auth/token/validate', 'POST', { token });
+        
+        if (result.valid) {
+            cacheToken(token, result);
+        }
+        
+        res.json(result);
+    } catch (error) {
+        console.error('Token check error:', error.message);
+        res.json({ 
+            valid: false, 
+            reason: 'VERIFICATION_FAILED',
+            error: error.message 
+        });
+    }
+});
+// NEW: Combined middleware - accepts both JWT and API tokens
 async function verifyAnyToken(req, res, next) {
     const token = extractToken(req);
     
@@ -165,6 +319,10 @@ async function verifyAnyToken(req, res, next) {
         return res.status(401).json({ error: 'Authentication token required' });
     }
 
+    // Check token length to determine type
+    // JWT tokens are much longer (3 parts separated by dots)
+    // API tokens are typically 64 characters (sha256 hash)
+    
     const isJWT = token.includes('.') && token.split('.').length === 3;
     
     if (isJWT) {
@@ -184,13 +342,18 @@ app.use((req, res, next) => {
 
 // Health check
 app.get('/api/health', (req, res) => {
+    const token = extractToken(req);
+    const isAuthenticated = token && getCachedToken(token) !== null;
+    
     res.status(200).json({ 
         status: 'ok',
         message: 'WhatsApp Server is running',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         activeClients: clients.size,
-        environment: NODE_ENV
+        cachedTokens: tokenCache.size,
+        environment: NODE_ENV,
+        authenticated: isAuthenticated
     });
 });
 
@@ -198,6 +361,7 @@ app.get('/api/health', (req, res) => {
 app.post('/api/auth/validate-token', async (req, res) => {
     try {
         const { token } = req.body;
+        
         if (!token) {
             return res.status(400).json({ error: 'Token is required' });
         }
@@ -212,9 +376,11 @@ app.post('/api/auth/validate-token', async (req, res) => {
 app.post('/api/auth/store-token', verifyAuth, async (req, res) => {
     try {
         const { deviceInfo } = req.body;
+        
         const result = await callPHPAPI('/auth/token/store', 'POST', { 
             device_info: deviceInfo || 'Web Browser' 
         }, req.token);
+        
         res.json(result);
     } catch (error) {
         console.error('Error storing token:', error.message);
@@ -225,6 +391,7 @@ app.post('/api/auth/store-token', verifyAuth, async (req, res) => {
 app.post('/api/auth/remove-token', verifyAuth, async (req, res) => {
     try {
         const { token } = req.body;
+        
         if (!token) {
             return res.status(400).json({ error: 'Token is required' });
         }
@@ -237,347 +404,488 @@ app.post('/api/auth/remove-token', verifyAuth, async (req, res) => {
 });
 
 // Helper to safely delete auth folder
-async function safeDeleteAuthFolder(authPath, maxRetries = 5, delay = 1000) {
-    for (let i = 0; i < maxRetries; i++) {
+// Enhanced safe delete function with better resource handling
+async function safeDeleteAuthFolder(authPath, maxRetries = 8, baseDelay = 1000) {
+    if (!fs.existsSync(authPath)) {
+        return true;
+    }
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            if (fs.existsSync(authPath)) {
-                await new Promise(resolve => setTimeout(resolve, delay));
-                fs.rmSync(authPath, { 
-                    recursive: true, 
-                    force: true,
-                    maxRetries: 3,
-                    retryDelay: 500
-                });
-                console.log(`✓ Successfully deleted auth data: ${authPath}`);
-                return true;
+            // First, try to close any Chrome processes that might be using these files
+            if (process.platform === 'win32') {
+                try {
+                    const { execSync } = require('child_process');
+                    // Kill any Chrome processes that might be locking files
+                    execSync('taskkill /f /im chrome.exe /t 2>nul || taskkill /f /im chromedriver.exe /t 2>nul', { stdio: 'ignore' });
+                } catch (e) {
+                    // Ignore errors - processes might not exist
+                }
             }
+
+            // Wait with exponential backoff
+            const delay = baseDelay * Math.pow(2, attempt);
+            if (attempt > 0) {
+                console.log(`⏳ Retry ${attempt}/${maxRetries} to delete auth folder (waiting ${delay}ms)...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+
+            // Try to remove individual files first before the folder
+            const files = fs.readdirSync(authPath);
+            for (const file of files) {
+                const filePath = path.join(authPath, file);
+                try {
+                    if (fs.statSync(filePath).isFile()) {
+                        fs.unlinkSync(filePath);
+                    } else {
+                        fs.rmSync(filePath, { recursive: true, force: true });
+                    }
+                } catch (fileError) {
+                    console.log(`⚠️ Could not delete ${filePath}: ${fileError.message}`);
+                    // Continue with other files
+                }
+            }
+
+            // Now try to delete the main folder
+            fs.rmSync(authPath, { 
+                recursive: true, 
+                force: true,
+                maxRetries: 3,
+                retryDelay: 1000
+            });
+            
+            console.log(`✅ Successfully deleted auth data: ${authPath}`);
             return true;
+
         } catch (error) {
-            if (i === maxRetries - 1) {
-                console.error(`✗ Failed to delete auth folder after ${maxRetries} attempts:`, error.message);
+            if (attempt === maxRetries - 1) {
+                console.error(`❌ Failed to delete auth folder after ${maxRetries} attempts: ${error.message}`);
+                
+                // Mark for deletion on next startup
+                try {
+                    const cleanupMarker = path.join('./auth_data', `cleanup-needed-${Date.now()}`);
+                    fs.writeFileSync(cleanupMarker, authPath);
+                } catch (e) {}
+                
                 return false;
             }
-            console.log(`↻ Retry ${i + 1}/${maxRetries} to delete auth folder...`);
-            await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
         }
     }
     return false;
 }
+// Function to kill any lingering Chrome processes
+async function killChromeProcesses() {
+    if (process.platform !== 'win32') return;
 
-// Clean stale auth data
-async function cleanStaleAuthData(userId) {
-    const authPath = path.join('./auth_data', `user-${userId}`);
-    if (fs.existsSync(authPath)) {
-        console.log(`🧹 Cleaning stale auth data for user ${userId}`);
-        await safeDeleteAuthFolder(authPath);
+    try {
+        const { execSync } = require('child_process');
+        
+        // List of processes that might lock files
+        const processes = ['chrome.exe', 'chromedriver.exe', 'node.exe'];
+        
+        for (const proc of processes) {
+            try {
+                execSync(`tasklist /fi "imagename eq ${proc}" | find /i "${proc}" >nul && (
+                    taskkill /f /im ${proc} /t
+                    echo Killed ${proc}
+                ) || echo ${proc} not running`, { stdio: 'ignore', shell: true });
+            } catch (e) {
+                // Process might not exist, which is fine
+            }
+        }
+        
+        // Additional cleanup for Windows
+        try {
+            execSync('wmic process where "name=\'chrome.exe\'" delete 2>nul', { stdio: 'ignore' });
+        } catch (e) {}
+        
+    } catch (error) {
+        console.log('⚠️ Chrome process cleanup warning:', error.message);
     }
 }
 
-// Cleanup client resources
-function cleanupClient(userId) {
-    console.log(`🧹 Cleaning up client resources for user ${userId}`);
+// Helper to check if auth folder exists and has valid session
+function hasValidAuthSession(userId) {
+    const authPath = path.join('./auth_data', `session-user-${userId}`);
+    return fs.existsSync(authPath);
+}
+
+// Helper to clean stale auth data
+// Enhanced stale auth data cleaner
+async function cleanStaleAuthData(userId) {
+    const authPath = path.join('./auth_data', `session-user-${userId}`);
     
-    if (clients.has(userId)) {
-        const client = clients.get(userId);
-        try {
-            client.ev.removeAllListeners();
-            client.ws?.close();
-        } catch (error) {
-            console.error(`Error destroying client: ${error.message}`);
-        }
-        clients.delete(userId);
+    if (!fs.existsSync(authPath)) {
+        return true;
+    }
+
+    console.log(`🧹 Enhanced cleaning for user ${userId} auth data...`);
+    
+    // Kill processes first
+    await killChromeProcesses();
+    
+    // Wait a bit for OS to release locks
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Use enhanced safe delete
+    const result = await safeDeleteAuthFolder(authPath);
+    
+    if (!result) {
+        console.log(`⚠️ Could not immediately delete auth data for user ${userId}, will retry later`);
+        // Schedule retry after 30 seconds
+        setTimeout(() => safeDeleteAuthFolder(authPath), 30000);
     }
     
-    qrCodes.delete(userId);
-    qrTimestamps.delete(userId);
-    connectionStates.delete(userId);
-    clientInitializing.delete(userId);
+    return result;
+}
+// Helper function to configure client heartbeat with fixes
+function configureClientHeartbeat(client, userId, token) {
+    // Check if already attached
+    if (eventListenersAttached.get(userId)) {
+        console.log(`⚠️ Event listeners already attached for user ${userId}, skipping...`);
+        return;
+    }
+    
+    eventListenersAttached.set(userId, true);
+    
+    let heartbeatInterval = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 10;  // ✅ Increased from 3
+    let isDestroyed = false;
+    let lastHeartbeatTime = Date.now();
+
+    const startHeartbeat = () => {
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+        }
+
+        console.log(`💓 Starting heartbeat for user ${userId}`);
+        heartbeatInterval = setInterval(async () => {
+            if (isDestroyed) {
+                console.log(`🛑 Heartbeat stopped - client destroyed for user ${userId}`);
+                stopHeartbeat();
+                return;
+            }
+
+            try {
+                // More robust browser check
+                if (!client?.pupBrowser?.isConnected?.() || client.pupBrowser.process?.killed) {
+                    console.log(`⚠️ Browser not available for user ${userId}, attempting recovery...`);
+                    // Don't destroy, just skip this cycle
+                    return;
+                }
+
+                const statePromise = client.getState();
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('State check timeout')), 8000)  // ✅ Increased timeout
+                );
+
+                const state = await Promise.race([statePromise, timeoutPromise]);
+                lastHeartbeatTime = Date.now();
+                
+                if (state === 'CONNECTED') {
+                    console.log(`💓 Heartbeat OK - Client alive for user ${userId}`);
+                    reconnectAttempts = 0;
+                } else if (state !== 'CONNECTING') {
+                    console.warn(`⚠️ Heartbeat: Client state is ${state} for user ${userId}`);
+                }
+            } catch (error) {
+                if (!error.message.includes('Execution context was destroyed') &&
+                    !error.message.includes('navigation') &&
+                    !error.message.includes('Session closed') &&
+                    !error.message.includes('timeout')) {
+                    console.error(`❌ Heartbeat error for user ${userId}:`, error.message);
+                } else {
+                    console.log(`⚠️ Heartbeat: ${error.message}`);
+                }
+            }
+        }, 30000);
+
+        return heartbeatInterval;
+    };
+
+    const stopHeartbeat = () => {
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+            console.log(`🛑 Heartbeat stopped for user ${userId}`);
+        }
+    };
+
+    // ✅ Improved auth failure handler
+    client.once('auth_failure', async (msg) => {
+        console.error(`❌ Auth failure for user ${userId}:`, msg);
+        isDestroyed = true;
+        stopHeartbeat();
+        eventListenersAttached.delete(userId);
+        
+        // Clean up gracefully
+        setTimeout(async () => {
+            try {
+                await cleanStaleAuthData(userId);
+            } catch (e) {
+                console.log(`Error during cleanup: ${e.message}`);
+            }
+        }, 2000);
+    });
+
+    // ✅ Improved disconnected handler with persistent recovery
+    client.once('disconnected', async (reason) => {
+        console.log(`🔌 Client disconnected for user ${userId}. Reason: ${reason}`);
+
+        isDestroyed = true;
+        stopHeartbeat();
+
+        // Keep client in map for potential recovery
+        let reconnected = false;
+
+        // Try to reconnect on unexpected disconnects
+        if (['LOGOUT', 'NAVIGATION', 'RESTORED'].includes(reason)) {
+            while (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttempts++;
+                const delay = 3000 * Math.pow(1.5, reconnectAttempts);  // ✅ Exponential backoff
+                
+                console.log(`🔄 Reconnect attempt #${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} (waiting ${delay}ms)...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                
+                try {
+                    await initializeClientForUser(userId, token, false);  // ✅ Don't force new
+                    reconnected = true;
+                    console.log(`✅ Auto-reconnect succeeded for user ${userId}`);
+                    break;
+                } catch (err) {
+                    console.error(`❌ Reconnect attempt #${reconnectAttempts} failed:`, err.message);
+                    
+                    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                        console.error(`❌ Max reconnect attempts reached for user ${userId}`);
+                    }
+                }
+            }
+        }
+
+        // Cleanup if reconnect failed
+        if (!reconnected) {
+            eventListenersAttached.delete(userId);
+            clients.delete(userId);
+            qrCodes.delete(userId);
+            
+            setTimeout(async () => {
+                await cleanStaleAuthData(userId);
+            }, 3000);
+        }
+    });
+
+    // ✅ State change handler
+    client.on('change_state', (state) => {
+        console.log(`🔄 State change for user ${userId}: ${state}`);
+        if (['CONFLICT', 'UNPAIRED', 'PHONE_OFFLINE'].includes(state)) {
+            console.warn(`⚠️ Critical state change: ${state}`);
+        }
+    });
+
+    // ✅ Ready handler - use ONCE
+    client.once('ready', async () => {
+        const info = client.info;
+        try {
+            await callPHPAPI('/whatsapp/session/update', 'POST', {
+                phone_number: info.wid.user,
+                pushname: info.pushname,
+                is_active: true
+            }, token);
+            
+            if (!isDestroyed) {
+                startHeartbeat();
+                console.log(`✅ Client ready and heartbeat started for user ${userId}: ${info.pushname}`);
+            }
+        } catch (error) {
+            console.error('❌ Error updating session:', error.message);
+        }
+    });
+
+    // ✅ Message handler - keep reference
+    client.on('message', async (message) => {
+        try {
+            const contact = await message.getContact();
+            const myInfo = client.info;
+
+            await callPHPAPI('/stats/update', 'POST', {
+                field: 'received',
+                increment: 1
+            }, token);
+
+            const hasMedia = message.hasMedia;
+            let mediaType = null;
+            let mediaUrl = null;
+
+            if (hasMedia) {
+                try {
+                    const media = await message.downloadMedia();
+                    if (media) {
+                        mediaType = media.mimetype.split('/')[0];
+                        const extension = media.mimetype.split('/')[1] || 'bin';
+                        const filename = `${Date.now()}_${message.id.id}.${extension}`;
+                        const filepath = path.join('uploads', filename);
+                        fs.writeFileSync(filepath, media.data, 'base64');
+                        mediaUrl = `/uploads/${filename}`;
+                    }
+                } catch (mediaError) {
+                    console.error('✗ Error downloading media:', mediaError);
+                }
+            }
+
+            await callPHPAPI('/messages/save', 'POST', {
+                message_id: message.id.id,
+                type: 'received',
+                from_number: contact.number,
+                from_name: contact.name || contact.pushname || contact.number,
+                to_number: myInfo.wid.user,
+                to_name: myInfo.pushname,
+                message_body: message.body || null,
+                has_media: hasMedia,
+                media_type: mediaType,
+                media_url: mediaUrl,
+                status: 'received',
+                timestamp: message.timestamp
+            }, token);
+
+            console.log(`✓ Message saved for user ${userId}`);
+        } catch (error) {
+            console.error('✗ Error saving received message:', error);
+        }
+    });
+
+    // ✅ Override destroy method
+    const originalDestroy = client.destroy.bind(client);
+    client.destroy = async function() {
+        isDestroyed = true;
+        stopHeartbeat();
+        eventListenersAttached.delete(userId);
+        try {
+            return await originalDestroy();
+        } catch (e) {
+            console.log(`Error during destroy: ${e.message}`);
+        }
+    };
+
+    return { startHeartbeat, stopHeartbeat };
 }
 
 // Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
+    // Check if initialization is already in progress
     if (initializationPromises.has(userId)) {
         console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
         return await initializationPromises.get(userId);
     }
 
+    // Create initialization promise
     const initPromise = (async () => {
         try {
             clientInitializing.set(userId, true);
-            console.log(`\n🔄 INITIALIZING CLIENT FOR USER ${userId} (forceNew: ${forceNew})`);
-
-            // Clean up existing client
-            if (clients.has(userId)) {
-                console.log(`🧹 Cleaning up existing client...`);
-                cleanupClient(userId);
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
+            console.log(`🔄 Starting client initialization for user ${userId} (forceNew: ${forceNew})`);
 
             if (forceNew) {
-                console.log(`🧹 Force cleaning auth data for user ${userId}...`);
+                console.log(`🧹 Force cleaning auth data for user ${userId}`);
                 await cleanStaleAuthData(userId);
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                const authPath = path.join('./auth_data', `session-user-${userId}`);
+                if (fs.existsSync(authPath)) {
+                    console.log(`⚠️ Auth data still exists, force deleting again...`);
+                    try {
+                        fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 3 });
+                    } catch (error) {
+                        console.error(`✗ Failed to force delete: ${error.message}`);
+                    }
+                }
             }
 
-            const authPath = `./auth_data/user-${userId}`;
-            console.log(`📂 Auth Path: ${authPath}`);
-            
-            const { state, saveCreds } = await useMultiFileAuthState(authPath);
-            console.log(`✅ Auth state loaded`);
-
-            // Fetch latest version
-            const { version } = await fetchLatestBaileysVersion();
-            console.log(`📦 Using Baileys version: ${version.join('.')}`);
-
-            console.log(`📋 Creating socket...`);
-            
-            const client = makeWASocket({
-                version,
-                auth: state,
-                logger: Pino({ level: 'debug' }),
-                printQRInTerminal: false,
-                browser: ['Ubuntu', 'Chrome', '120.0.0.0'],
-                markOnlineOnConnect: false,
-                generateHighQualityLinkPreview: false,
-                syncFullHistory: false,
-                defaultQueryTimeoutMs: 60000,
-                retryRequestDelayMs: 2000,
-                maxRetries: 10,
-                connectTimeoutMs: 120000,
-                keepAliveIntervalMs: 30000,
-                emitOwnEvents: true,
-                fireInitQueries: false,
-                mobile: false,
-                readReceipts: false,
-                downloadHistory: false,
-                shouldIgnoreJid: (jid) => false,
-                getMessage: async (key) => {
-                    return { conversation: '' };
-                },
-                qrTimeout: 60000,
-                transactionTimeout: 120000,
-                shouldSyncHistoryMessage: () => false
-            });
-
-            console.log(`✅ Socket created`);
-
-            // Store client immediately
-            clients.set(userId, client);
-            connectionStates.set(userId, 'connecting');
-            console.log(`✅ Client stored in map`);
-
-            // Set up connection update handler FIRST before anything else
-            let qrGenerationCount = 0;
-            const MAX_QR_GENERATIONS = 10;
-            let connectionEventFired = false;
-
-            // Add error handler
-            client.ev.on('error', (error) => {
-                console.error(`🔴 CLIENT ERROR for user ${userId}:`, error.message);
-            });
-
-            client.ev.on('connection.update', async (update) => {
-                connectionEventFired = true;
-                const { connection, lastDisconnect, qr, isOnline } = update;
-
-                console.log(`\n[🔗 CONNECTION UPDATE for user ${userId}]`);
-                console.log(`  Connection: ${connection}`);
-                console.log(`  QR Code: ${!!qr}`);
-                console.log(`  Online: ${isOnline}`);
-                
-                if (lastDisconnect?.error) {
-                    console.log(`  Disconnect Reason: ${lastDisconnect.error.output?.statusCode}`);
-                    console.log(`  Error Message: ${lastDisconnect.error.message}`);
-                }
-
-                // Handle QR code generation with extended expiration
-                if (qr) {
-                    qrGenerationCount++;
-                    console.log(`\n🔲 QR CODE RECEIVED (Generation #${qrGenerationCount}/${MAX_QR_GENERATIONS})`);
-                    
-                    if (qrGenerationCount > MAX_QR_GENERATIONS) {
-                        console.log(`⚠️ Max QR generations reached, restarting connection...`);
-                        cleanupClient(userId);
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        return;
-                    }
-                    
-                    try {
-                        const qrData = await QRCode.toDataURL(qr);
-                        qrCodes.set(userId, qrData);
-                        qrTimestamps.set(userId, Date.now());
-                        connectionStates.set(userId, 'qr_ready');
-                        console.log(`✅ QR CODE STORED - Expires in ${QR_EXPIRATION_TIME/1000} seconds`);
-                        console.log(`📊 QR Code Length: ${qrData.length} chars`);
-                        
-                        // Set QR expiration timer with EXTENDED TIME
-                        setTimeout(() => {
-                            const currentQrTime = qrTimestamps.get(userId);
-                            if (currentQrTime && Date.now() - currentQrTime >= QR_EXPIRATION_TIME) {
-                                console.log(`⏰ QR Code expired for user ${userId}`);
-                                if (connectionStates.get(userId) !== 'connected') {
-                                    qrCodes.delete(userId);
-                                    connectionStates.set(userId, 'qr_expired');
-                                }
-                            }
-                        }, QR_EXPIRATION_TIME);
-                    } catch (error) {
-                        console.error('❌ Error converting QR to data URL:', error.message);
-                    }
-                }
-
-                if (connection === 'connecting') {
-                    console.log(`🔄 CONNECTING for user ${userId}...`);
-                    connectionStates.set(userId, 'connecting');
-                    // Don't set to disconnected, keep trying
-                    return;
-                }
-
-                if (connection === 'open') {
-                    console.log(`\n🎉 CONNECTION OPENED for user ${userId}`);
-                    connectionStates.set(userId, 'connected');
-                    qrCodes.delete(userId);
-                    qrTimestamps.delete(userId);
-                    qrGenerationCount = 0;
-                    
-                    try {
-                        const userInfo = client.user;
-                        if (userInfo && userInfo.id) {
-                            const phoneNumber = userInfo.id.split(':')[0];
-                            console.log(`📞 Phone Number: ${phoneNumber}`);
-                            console.log(`👤 Push Name: ${userInfo.name || userInfo.pushname || 'User'}`);
-                            
-                            console.log(`📤 Updating session in database...`);
-                            await callPHPAPI('/whatsapp/session/update', 'POST', {
-                                phone_number: phoneNumber,
-                                pushname: userInfo.name || userInfo.pushname || 'User',
-                                is_active: true
-                            }, token);
-                            
-                            console.log(`✅ Session updated in database\n`);
-                        }
-                    } catch (error) {
-                        console.error('❌ Error updating session:', error.message);
-                    }
-                }
-
-                if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                    
-                    console.log(`\n🔌 CONNECTION CLOSED for user ${userId}`);
-                    console.log(`   Status Code: ${statusCode}`);
-                    console.log(`   Should Reconnect: ${shouldReconnect}`);
-                    console.log(`   Reason: ${DisconnectReason[statusCode] || 'Unknown'}`);
-                    
-                    connectionStates.set(userId, 'disconnected');
-                    
-                    if (statusCode === DisconnectReason.loggedOut) {
-                        console.log(`🚪 User logged out - cleaning all data`);
-                        cleanupClient(userId);
-                        initializationPromises.delete(userId);
-                        
-                        try {
-                            await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, token);
-                            await cleanStaleAuthData(userId);
-                        } catch (error) {
-                            console.error('❌ Error cleaning up after logout:', error.message);
-                        }
-                    } else if (shouldReconnect) {
-                        console.log(`🔄 Attempting to reconnect...`);
-                    } else {
-                        cleanupClient(userId);
-                        initializationPromises.delete(userId);
-                    }
+            const client = new Client({
+                authStrategy: new LocalAuth({ 
+                    dataPath: './auth_data',
+                    clientId: `user-${userId}`
+                }),
+                puppeteer: {
+                    headless: true,
+                    args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--no-first-run',
+                        '--no-zygote',
+                        '--single-process',
+                        '--disable-gpu',
+                        '--disable-web-resources'
+                    ]
                 }
             });
 
-            // Save credentials on update
-            client.ev.on('creds.update', saveCreds);
-            console.log(`✅ Credentials listener attached`);
+            let qrGenerated = false;
+            let authenticated = false;
 
-            // Add socket event listeners for debugging
-            if (client.ws) {
-                console.log(`📡 WebSocket listeners attached`);
-                client.ws.on('open', () => {
-                    console.log(`✅ WebSocket OPEN for user ${userId}`);
-                });
-                client.ws.on('close', () => {
-                    console.log(`🔌 WebSocket CLOSE for user ${userId}`);
-                });
-                client.ws.on('error', (error) => {
-                    console.error(`🔴 WebSocket ERROR for user ${userId}:`, error.message);
-                });
-            }
+            // QR handler - use ONCE
+            client.once('qr', async (qr) => {
+                qrGenerated = true;
+                const qrData = await qrcode.toDataURL(qr);
+                qrCodes.set(userId, qrData);
+                console.log(`📱 QR Code generated for user ${userId}`);
+            });
 
-            // Messages handler
-            client.ev.on('messages.upsert', async (m) => {
-                const message = m.messages[0];
-                
-                if (!message.message || message.key.fromMe || isJidBroadcast(message.key.remoteJid)) return;
+            // Authenticated handler - use ONCE
+            client.once('authenticated', async () => {
+                authenticated = true;
+                console.log(`✓ User ${userId} authenticated`);
+                qrCodes.delete(userId);
+            });
 
+            // Configure heartbeat and event handlers
+            configureClientHeartbeat(client, userId, token);
+
+            // Message handler
+            client.on('message', async (message) => {
                 try {
-                    const myInfo = client.user;
-                    if (!myInfo) return;
+                    const contact = await message.getContact();
+                    const myInfo = client.info;
 
                     await callPHPAPI('/stats/update', 'POST', {
                         field: 'received',
                         increment: 1
                     }, token);
 
-                    let hasMedia = false;
+                    const hasMedia = message.hasMedia;
                     let mediaType = null;
                     let mediaUrl = null;
-                    let messageBody = null;
 
-                    // Extract message body
-                    if (message.message.conversation) {
-                        messageBody = message.message.conversation;
-                    } else if (message.message.extendedTextMessage) {
-                        messageBody = message.message.extendedTextMessage.text;
-                    }
-
-                    // Check for media
-                    const mediaKeys = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'];
-                    for (const key of mediaKeys) {
-                        if (message.message[key]) {
-                            hasMedia = true;
-                            mediaType = key.replace('Message', '').toLowerCase();
-                            
-                            try {
-                                const buffer = await client.downloadMediaMessage(message);
-                                if (buffer) {
-                                    const ext = key === 'documentMessage' ? 
-                                        (message.message[key].fileName?.split('.').pop() || 'bin') : 
-                                        mediaType;
-                                    const filename = `${Date.now()}_${message.key.id}.${ext}`;
-                                    const filepath = path.join('uploads', filename);
-                                    fs.writeFileSync(filepath, buffer);
-                                    mediaUrl = `/uploads/${filename}`;
-                                }
-                            } catch (mediaError) {
-                                console.error('✗ Error downloading media:', mediaError);
+                    if (hasMedia) {
+                        try {
+                            const media = await message.downloadMedia();
+                            if (media) {
+                                mediaType = media.mimetype.split('/')[0];
+                                const extension = media.mimetype.split('/')[1] || 'bin';
+                                const filename = `${Date.now()}_${message.id.id}.${extension}`;
+                                const filepath = path.join('uploads', filename);
+                                fs.writeFileSync(filepath, media.data, 'base64');
+                                mediaUrl = `/uploads/${filename}`;
                             }
-                            break;
+                        } catch (mediaError) {
+                            console.error('✗ Error downloading media:', mediaError);
                         }
                     }
 
-                    const phoneNumber = message.key.remoteJid.split('@')[0];
-                    const myPhoneNumber = myInfo.id.split(':')[0];
-
                     await callPHPAPI('/messages/save', 'POST', {
-                        message_id: message.key.id,
+                        message_id: message.id.id,
                         type: 'received',
-                        from_number: phoneNumber,
-                        from_name: phoneNumber,
-                        to_number: myPhoneNumber,
-                        to_name: myInfo.name || myInfo.pushname || 'User',
-                        message_body: messageBody,
+                        from_number: contact.number,
+                        from_name: contact.name || contact.pushname || contact.number,
+                        to_number: myInfo.wid.user,
+                        to_name: myInfo.pushname,
+                        message_body: message.body || null,
                         has_media: hasMedia,
                         media_type: mediaType,
                         media_url: mediaUrl,
                         status: 'received',
-                        timestamp: message.messageTimestamp
+                        timestamp: message.timestamp
                     }, token);
 
                     console.log(`✓ Message saved for user ${userId}`);
@@ -586,99 +894,80 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 }
             });
 
-            clientInitializing.delete(userId);
-
-            // Give Baileys time to initialize
-            console.log(`⏳ Allowing Baileys to initialize (3 seconds)...`);
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
-            // Check if socket is actually connected
-            const isSocketConnected = () => {
-                if (!client.ws) return false;
-                const readyState = client.ws.readyState;
-                return readyState === 1 || readyState === 0; // OPEN or CONNECTING
-            };
-
-            console.log(`📡 Socket readyState: ${client.ws?.readyState}`);
-            console.log(`📡 Socket connected: ${isSocketConnected()}`);
-            console.log(`📡 Connection event fired: ${connectionEventFired}`);
-
-            // Wait for QR code or connection
-            console.log(`⏳ Waiting for QR code or connection (max 40 seconds)...`);
+            console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
+            await client.initialize();
+            
             let waitTime = 0;
-            const maxWait = 40000;
+            // while (waitTime < 15000 && !qrGenerated && !authenticated) {
+            //     await new Promise(resolve => setTimeout(resolve, 500));
+            //     waitTime += 500;
+            // }
             
-            while (waitTime < maxWait) {
-                const qr = qrCodes.get(userId);
-                const state = connectionStates.get(userId);
+            try {
+                const state = await client.getState();
+                console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
                 
-                // Check if we have QR
-                if (qr && state === 'qr_ready') {
-                    console.log(`✅ QR Code ready after ${waitTime}ms`);
-                    break;
+                if (state === 'CONNECTED' && !qrGenerated && forceNew) {
+                    console.error(`❌ ERROR: Client connected without QR despite forceNew!`);
+                    console.log(`🔄 Destroying and retrying...`);
+                    
+                    await client.destroy();
+                    eventListenersAttached.delete(userId);
+                    await cleanStaleAuthData(userId);
+                    clientInitializing.delete(userId);
+                    initializationPromises.delete(userId);
+                    
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                    const authPath = path.join('./auth_data', `session-user-${userId}`);
+                    if (fs.existsSync(authPath)) {
+                        const parentDir = path.join('./auth_data');
+                        const sessionDirs = fs.readdirSync(parentDir).filter(f => f.includes(`user-${userId}`));
+                        sessionDirs.forEach(dir => {
+                            const fullPath = path.join(parentDir, dir);
+                            console.log(`🧹 Removing: ${fullPath}`);
+                            fs.rmSync(fullPath, { recursive: true, force: true, maxRetries: 5 });
+                        });
+                    }
+                    
+                    return await initializeClientForUser(userId, token, forceNew);
                 }
                 
-                // Check if connected
-                if (state === 'connected' && client.user) {
-                    console.log(`✅ Connected successfully after ${waitTime}ms`);
-                    break;
-                }
-                
-                // If socket died, break
-                if (!isSocketConnected() && connectionEventFired) {
-                    console.log(`⚠️ Socket disconnected after ${waitTime}ms`);
-                    break;
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 500));
-                waitTime += 500;
-                
-                if (waitTime % 5000 === 0) {
-                    console.log(`⏰ Waiting ${waitTime/1000}s... State: ${state}, QR: ${!!qr}, Socket: ${isSocketConnected()}, Event: ${connectionEventFired}`);
-                }
+            } catch (error) {
+                console.log(`✗ Error checking state: ${error.message}`);
             }
-
-            const finalState = connectionStates.get(userId);
-            const finalQR = qrCodes.get(userId);
-            console.log(`\n✅ INITIALIZATION COMPLETE FOR USER ${userId}`);
-            console.log(`   Connection State: ${finalState}`);
-            console.log(`   Connection Event Fired: ${connectionEventFired}`);
-            console.log(`   Socket Connected: ${isSocketConnected()}`);
-            console.log(`   QR Available: ${!!finalQR}`);
-            console.log(`   Client Authenticated: ${!!client.user}`);
-            console.log(`   Client Ready: ${!!client}\n`);
             
-            // If we don't have QR or connection after init, update state
-            if (!finalQR && !client.user && finalState === 'connecting') {
-                console.log(`⚠️ No QR and not connected - setting to qr_ready anyway for polling`);
-                connectionStates.set(userId, 'qr_ready');
-            }
+            clients.set(userId, client);
+            clientInitializing.delete(userId);
+            console.log(`✓ Client successfully initialized for user ${userId}`);
             
             return client;
         } catch (error) {
-            console.error(`\n❌ Error initializing client for user ${userId}:`, error.message);
-            console.error(error.stack);
-            cleanupClient(userId);
+            console.error(`✗ Error initializing client for user ${userId}:`, error);
+            clientInitializing.delete(userId);
             initializationPromises.delete(userId);
+            eventListenersAttached.delete(userId);
             await cleanStaleAuthData(userId);
             throw error;
         }
     })();
 
+    // Store the promise
     initializationPromises.set(userId, initPromise);
 
+    // Remove promise when done (success or failure)
     initPromise.finally(() => {
         initializationPromises.delete(userId);
     });
 
     return await initPromise;
 }
-
 // WhatsApp Routes
 app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
     try {
-        console.log(`\n📱 Initialize request for user ${req.userId}`);
+        console.log(`📱 Initialize request for user ${req.userId}`);
         
+        // Check if already initializing
         if (initializationPromises.has(req.userId)) {
             console.log(`⚠️ Initialization already in progress for user ${req.userId}`);
             return res.status(409).json({ 
@@ -687,37 +976,46 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             });
         }
         
-        cleanupClient(req.userId);
+        // Destroy existing client first
+        if (clients.has(req.userId)) {
+            const client = clients.get(req.userId);
+            console.log(`🧹 Destroying existing client for user ${req.userId}`);
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.log(`✗ Error destroying client: ${error.message}`);
+            }
+            clients.delete(req.userId);
+            eventListenersAttached.delete(req.userId);
+        }
 
+        // Clean QR codes and state
+        qrCodes.delete(req.userId);
+        clientInitializing.delete(req.userId);
+
+        // Check and clean database session
         try {
-            await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
+            const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
+            if (session?.is_active) {
+                console.log(`🧹 Cleaning database session for user ${req.userId}`);
+                await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
+            }
         } catch (error) {
             console.log(`No database session to clean for user ${req.userId}`);
         }
 
+        // Clean auth data
         console.log(`🧹 Cleaning auth data for user ${req.userId}`);
         await cleanStaleAuthData(req.userId);
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
+        // Initialize fresh client
         console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
-        const client = await initializeClientForUser(req.userId, req.token, true);
-        
-        const qr = qrCodes.get(req.userId);
-        const isConnected = client && client.user;
-        const state = connectionStates.get(req.userId);
-        
-        console.log(`\n📊 INITIALIZATION RESULT FOR USER ${req.userId}:`);
-        console.log(`   State: ${state}`);
-        console.log(`   QR Code: ${qr ? '✅ AVAILABLE' : '❌ NOT AVAILABLE'}`);
-        console.log(`   Connected: ${isConnected ? '✅ YES' : '❌ NO'}`);
+        await initializeClientForUser(req.userId, req.token, true);
         
         res.json({ 
             success: true, 
-            message: qr ? 'QR code generated successfully' : (isConnected ? 'Already connected' : 'Initializing...'),
-            hasQR: !!qr,
-            isConnected: !!isConnected,
-            state: state,
-            clientReady: !!client
+            message: 'WhatsApp client initializing, please scan QR code' 
         });
     } catch (error) {
         console.error('✗ Initialize error:', error);
@@ -725,69 +1023,70 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
     }
 });
 
+// Improved client destruction with better cleanup
+async function safeDestroyClient(client, userId) {
+    if (!client) return;
+
+    try {
+        console.log(`🛑 Starting safe destruction for user ${userId}...`);
+        
+        // Stop any heartbeats first
+        if (eventListenersAttached.has(userId)) {
+            eventListenersAttached.delete(userId);
+        }
+
+        // Remove from tracking maps
+        clients.delete(userId);
+        qrCodes.delete(userId);
+        clientInitializing.delete(userId);
+        initializationPromises.delete(userId);
+
+        // Try to destroy client gracefully
+        if (typeof client.destroy === 'function') {
+            await client.destroy().catch(err => {
+                console.log(`⚠️ Graceful destroy failed: ${err.message}`);
+            });
+        }
+
+        // Kill Chrome processes
+        await killChromeProcesses();
+
+        console.log(`✅ Client safely destroyed for user ${userId}`);
+    } catch (error) {
+        console.error(`❌ Error in safeDestroyClient for user ${userId}:`, error.message);
+    }
+}
+
 app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
-        const qr = qrCodes.get(req.userId);
-        const qrTimestamp = qrTimestamps.get(req.userId);
-        const state = connectionStates.get(req.userId);
         
-        console.log(`\n📱 QR request for user ${req.userId}:`);
-        console.log(`   - Client exists: ${!!client}`);
-        console.log(`   - Client authenticated: ${!!(client?.user)}`);
-        console.log(`   - Connection state: ${state}`);
-        console.log(`   - QR code exists: ${!!qr}`);
-        
-        // Check QR expiration with EXTENDED TIME
-        if (qr && qrTimestamp) {
-            const age = Date.now() - qrTimestamp;
-            if (age > QR_EXPIRATION_TIME) {
-                console.log(`   - QR expired (age: ${age}ms), clearing...`);
-                qrCodes.delete(req.userId);
-                qrTimestamps.delete(req.userId);
-                return res.json({ 
-                    qr: null, 
-                    ready: false,
-                    expired: true,
-                    message: 'QR code expired, please reinitialize',
-                    state: state
-                });
-            }
-            console.log(`   - QR age: ${age}ms (expires in ${QR_EXPIRATION_TIME - age}ms)`);
-        }
-        
-        if (client && client.user) {
-            console.log(`   - Client is authenticated - returning connection status`);
+        // Check actual client state
+        if (client) {
             try {
-                const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
-                return res.json({ 
-                    qr: null, 
-                    ready: true, 
-                    session,
-                    state: 'connected'
-                });
+                const state = await client.getState();
+                console.log(`QR request - Client state for user ${req.userId}: ${state}`);
+                
+                if (state === 'CONNECTED') {
+                    const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
+                    return res.json({ 
+                        qr: null, 
+                        ready: true, 
+                        session 
+                    });
+                }
             } catch (error) {
-                console.log('Error fetching session:', error.message);
-                return res.json({ 
-                    qr: null, 
-                    ready: true,
-                    session: null,
-                    state: 'connected'
-                });
+                console.log(`✗ Error checking client state: ${error.message}`);
             }
         }
 
-        if (qr) {
-            console.log(`   ✅ Returning QR code of length: ${qr.length}`);
-        } else {
-            console.log(`   ❌ No QR code available`);
-        }
-
+        const qr = qrCodes.get(req.userId);
+        console.log(`QR code ${qr ? 'exists' : 'does not exist'} for user ${req.userId}`);
+        
         res.json({ 
             qr: qr || null, 
             ready: false,
-            session: null,
-            state: state || 'unknown'
+            session: null
         });
     } catch (error) {
         console.error('✗ QR fetch error:', error);
@@ -798,96 +1097,169 @@ app.get('/api/whatsapp/qr', verifyAuth, async (req, res) => {
 app.get('/api/whatsapp/status', verifyAuth, async (req, res) => {
     try {
         const client = clients.get(req.userId);
-        const state = connectionStates.get(req.userId);
         let isConnected = false;
-        let clientState = state || 'NONE';
+        let clientState = 'NONE';
         
         if (client) {
-            isConnected = !!client.user;
-            if (isConnected && clientState !== 'connected') {
-                clientState = 'connected';
-                connectionStates.set(req.userId, 'connected');
+            try {
+                const statePromise = client.getState();
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('State check timeout')), 3000)
+                );
+                
+                clientState = await Promise.race([statePromise, timeoutPromise]);
+                isConnected = clientState === 'CONNECTED';
+                console.log(`Status check - Client state for user ${req.userId}: ${clientState}`);
+            } catch (error) {
+                console.log(`✗ Error checking client state: ${error.message}`);
+                if (error.message.includes('timeout')) {
+                    // Client might be frozen, remove it
+                    clients.delete(req.userId);
+                    clientState = 'TIMEOUT';
+                }
             }
-            console.log(`Status check - Client state for user ${req.userId}: ${clientState}`);
         }
 
         let session = null;
         try {
             session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
         } catch (error) {
-            // Session doesn't exist
+            console.log(`No session in DB for user ${req.userId}`);
+        }
+        
+        // If DB says connected but client isn't, clean up DB
+        if (session?.is_active && !isConnected) {
+            console.log(`🧹 Cleaning stale DB session for user ${req.userId}`);
+            try {
+                await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
+                session = null;
+            } catch (error) {
+                console.error('✗ Error cleaning stale session:', error.message);
+            }
         }
         
         res.json({
             connected: isConnected && session?.is_active,
             session: session || null,
             clientActive: isConnected,
-            clientState: clientState,
-            hasQR: qrCodes.has(req.userId),
-            qrExpired: qrTimestamps.has(req.userId) && (Date.now() - qrTimestamps.get(req.userId)) > QR_EXPIRATION_TIME
+            clientState,
+            timestamp: Date.now()
         });
     } catch (error) {
         console.error('✗ Status check error:', error.message);
-        res.status(500).json({ error: error.message });
+        
+        res.status(500).json({ 
+            error: error.message,
+            code: 'STATUS_CHECK_FAILED'
+        });
     }
 });
 
+// Export for use in main server file
+module.exports = {
+    verifyAuth,
+    verifyApiToken,
+    verifyAnyToken,
+    callPHPAPI,
+    cacheToken,
+    getCachedToken,
+    tokenCache
+};
+
 app.post('/api/whatsapp/disconnect', verifyAuth, async (req, res) => {
     try {
-        console.log(`🔌 Disconnect request for user ${req.userId}`);
+        console.log(`🔌 Enhanced disconnect request for user ${req.userId}`);
         
         const client = clients.get(req.userId);
         
+        // Use safe destruction
         if (client) {
-            try {
-                await client.logout();
-                console.log(`✓ Client logged out for user ${req.userId}`);
-            } catch (error) {
-                console.error('✗ Error logging out client:', error.message);
-            }
+            await safeDestroyClient(client, req.userId);
+        } else {
+            // Still clean up even if no client object
+            clients.delete(req.userId);
+            qrCodes.delete(req.userId);
+            clientInitializing.delete(req.userId);
+            initializationPromises.delete(req.userId);
         }
 
-        cleanupClient(req.userId);
-
+        // Update database
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
         } catch (error) {
             console.error('✗ Error updating DB session:', error);
         }
 
-        console.log(`✓ WhatsApp disconnected for user ${req.userId}`);
+        // Enhanced auth data cleanup
         await cleanStaleAuthData(req.userId);
+        
+        console.log(`✅ WhatsApp fully disconnected for user ${req.userId}`);
         
         res.json({ 
             success: true, 
             message: 'WhatsApp disconnected successfully' 
         });
+        
     } catch (error) {
         console.error('✗ Error disconnecting WhatsApp:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
+// Manual cleanup endpoint - IMPORTANT for debugging
 app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     try {
         console.log(`🧹 Force cleanup requested for user ${req.userId}`);
         
-        cleanupClient(req.userId);
-        initializationPromises.delete(req.userId);
+        // Destroy client if exists
+        if (clients.has(req.userId)) {
+            const client = clients.get(req.userId);
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.log(`Error destroying client: ${error.message}`);
+            }
+            clients.delete(req.userId);
+        }
         
+        // Clear all state
+        qrCodes.delete(req.userId);
+        clientInitializing.delete(req.userId);
+        
+        // Update database
         try {
             await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
         } catch (error) {
             console.log(`Error updating DB: ${error.message}`);
         }
         
+        // Force clean auth data
         await cleanStaleAuthData(req.userId);
         
+        // Double check and force delete
         await new Promise(resolve => setTimeout(resolve, 1000));
-        const authPath = path.join('./auth_data', `user-${req.userId}`);
+        const authPath = path.join('./auth_data', `session-user-${req.userId}`);
         if (fs.existsSync(authPath)) {
             console.log(`🧹 Auth data still exists, force removing...`);
             fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 5 });
+        }
+        
+        // Check all session directories for this user
+        const parentDir = path.join('./auth_data');
+        if (fs.existsSync(parentDir)) {
+            const allDirs = fs.readdirSync(parentDir);
+            const userDirs = allDirs.filter(d => d.includes(`user-${req.userId}`));
+            console.log(`Found ${userDirs.length} directories for user ${req.userId}`);
+            
+            userDirs.forEach(dir => {
+                const fullPath = path.join(parentDir, dir);
+                console.log(`🧹 Removing: ${fullPath}`);
+                try {
+                    fs.rmSync(fullPath, { recursive: true, force: true, maxRetries: 5 });
+                } catch (error) {
+                    console.error(`Failed to remove ${fullPath}:`, error.message);
+                }
+            });
         }
         
         res.json({
@@ -898,8 +1270,7 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
                 qrCode: true,
                 initializing: true,
                 database: true,
-                authData: true,
-                state: true
+                authData: true
             }
         });
     } catch (error) {
@@ -908,7 +1279,7 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
     }
 });
 
-// Messaging Routes
+// Messaging Routes - Accept both JWT and API tokens
 app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
         const { number, message } = req.body;
@@ -919,64 +1290,70 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         
         const client = clients.get(req.userId);
 
-        if (!client || !client.user) {
+        if (!client) {
             return res.status(400).json({ 
                 error: 'WhatsApp not connected',
                 details: 'Please connect your WhatsApp first'
             });
         }
 
-        const jid = number.includes('@') ? number : `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+        const state = await client.getState();
+        if (state !== 'CONNECTED') {
+            return res.status(400).json({ error: 'WhatsApp not ready to send messages' });
+        }
+
+        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
         
-        console.log(`📤 Sending message to ${jid} for user ${req.userId} (Auth: ${req.authType})`);
-        const sentMessage = await client.sendMessage(jid, { text: message });
-        console.log(`✓ Message sent successfully: ${sentMessage.key.id}`);
+        console.log(`📤 Sending message to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
+        const sentMessage = await client.sendMessage(chatId, message);
+        console.log(`✓ Message sent successfully: ${sentMessage.id.id}`);
 
         let contactName = number;
         try {
-            const [result] = await client.onWhatsApp(jid);
-            if (result?.exists) {
-                contactName = result.notify || number;
-            }
+            const contact = await client.getContactById(chatId);
+            contactName = contact.name || contact.pushname || number;
         } catch (err) {
             console.log('Could not get contact name:', err.message);
         }
 
-        const myInfo = client.user;
-        const phoneNumber = myInfo.id.split(':')[0];
+        const myInfo = client.info;
+
+        // Use API token if available, otherwise use JWT
+        const authToken = req.authType === 'api_token' ? req.token : req.token;
 
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
-            message_id: sentMessage.key.id,
+            message_id: sentMessage.id.id,
             type: 'sent',
-            from_number: phoneNumber,
-            from_name: myInfo.name || myInfo.pushname || 'User',
-            to_number: number.replace(/[^0-9]/g, ''),
+            from_number: myInfo.wid.user,
+            from_name: myInfo.pushname,
+            to_number: number,
             to_name: contactName,
             message_body: message,
             has_media: false,
             status: 'sent',
-            timestamp: Math.floor(Date.now() / 1000)
-        }, req.token);
+            timestamp: sentMessage.timestamp
+        }, authToken);
 
         await callPHPAPI('/stats/update', 'POST', {
             field: 'sent',
             increment: 1
-        }, req.token);
+        }, authToken);
 
         res.json({ 
             success: true, 
             message: 'Message sent successfully',
-            messageId: sentMessage.key.id,
+            messageId: sentMessage.id.id,
             dbId: savedMessage.id
         });
     } catch (error) {
         console.error('✗ Error sending message:', error);
         
         try {
+            const authToken = req.authType === 'api_token' ? req.token : req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
-            }, req.token);
+            }, authToken);
         } catch (e) {}
         
         res.status(500).json({ success: false, error: error.message });
@@ -997,120 +1374,91 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
         
         const client = clients.get(req.userId);
 
-        if (!client || !client.user) {
+        if (!client) {
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const jid = number.includes('@') ? number : `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-        const mediaBuffer = fs.readFileSync(req.file.path);
-        const mimetype = req.file.mimetype;
+        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
+        const media = MessageMedia.fromFilePath(req.file.path);
         
-        console.log(`📤 Sending media to ${jid} for user ${req.userId} (Auth: ${req.authType})`);
-        
-        const mediaMessage = {
-            caption: caption || undefined
-        };
-
-        if (mimetype.startsWith('image')) {
-            mediaMessage.image = mediaBuffer;
-            mediaMessage.mimetype = mimetype;
-        } else if (mimetype.startsWith('video')) {
-            mediaMessage.video = mediaBuffer;
-            mediaMessage.mimetype = mimetype;
-        } else if (mimetype.startsWith('audio')) {
-            mediaMessage.audio = mediaBuffer;
-            mediaMessage.mimetype = mimetype;
-            mediaMessage.ptt = false;
-        } else {
-            mediaMessage.document = mediaBuffer;
-            mediaMessage.mimetype = mimetype;
-            mediaMessage.fileName = req.file.originalname;
-        }
-
-        const sentMessage = await client.sendMessage(jid, mediaMessage);
-        console.log(`✓ Media sent successfully: ${sentMessage.key.id}`);
+        console.log(`📤 Sending media to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
+        const sentMessage = await client.sendMessage(chatId, media, { caption });
+        console.log(`✓ Media sent successfully: ${sentMessage.id.id}`);
 
         let contactName = number;
         try {
-            const [result] = await client.onWhatsApp(jid);
-            if (result?.exists) {
-                contactName = result.notify || number;
-            }
+            const contact = await client.getContactById(chatId);
+            contactName = contact.name || contact.pushname || number;
         } catch (err) {
             console.log('Could not get contact name:', err.message);
         }
 
-        const myInfo = client.user;
-        const phoneNumber = myInfo.id.split(':')[0];
+        const myInfo = client.info;
         const mediaType = req.file.mimetype.split('/')[0];
+        const authToken = req.authType === 'api_token' ? req.token : req.token;
 
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
-            message_id: sentMessage.key.id,
+            message_id: sentMessage.id.id,
             type: 'sent',
-            from_number: phoneNumber,
-            from_name: myInfo.name || myInfo.pushname || 'User',
-            to_number: number.replace(/[^0-9]/g, ''),
+            from_number: myInfo.wid.user,
+            from_name: myInfo.pushname,
+            to_number: number,
             to_name: contactName,
             message_body: caption || null,
             has_media: true,
             media_type: mediaType,
             media_url: `/uploads/${req.file.filename}`,
             status: 'sent',
-            timestamp: Math.floor(Date.now() / 1000)
-        }, req.token);
+            timestamp: sentMessage.timestamp
+        }, authToken);
 
         await callPHPAPI('/stats/update', 'POST', {
             field: 'sent',
             increment: 1
-        }, req.token);
+        }, authToken);
 
         res.json({ 
             success: true, 
             message: 'Media sent successfully',
-            messageId: sentMessage.key.id,
+            messageId: sentMessage.id.id,
             dbId: savedMessage.id
         });
     } catch (error) {
         console.error('✗ Error sending media:', error);
         
         if (req.file && fs.existsSync(req.file.path)) {
-            try {
-                fs.unlinkSync(req.file.path);
-            } catch (e) {
-                console.error('Error deleting uploaded file:', e.message);
-            }
+            fs.unlinkSync(req.file.path);
         }
         
         try {
+            const authToken = req.authType === 'api_token' ? req.token : req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
-            }, req.token);
+            }, authToken);
         } catch (e) {}
         
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Public endpoints - API tokens only
+// Public endpoints - only accept API tokens
 app.get('/api/chats', verifyApiToken, async (req, res) => {
     try {
         const client = clients.get(req.userId);
-        if (!client || !client.user) {
+        if (!client) {
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const chats = await client.store?.chats?.all() || [];
+        const chats = await client.getChats();
         const chatList = chats.map(chat => ({
-            id: chat.id,
-            name: chat.name || chat.id.split('@')[0],
-            isGroup: chat.id.endsWith('@g.us'),
-            unreadCount: chat.unreadCount || 0,
-            lastMessageTime: chat.conversationTimestamp || null
+            id: chat.id._serialized,
+            name: chat.name,
+            isGroup: chat.isGroup,
+            unreadCount: chat.unreadCount
         }));
         res.json(chatList);
     } catch (error) {
-        console.error('Error fetching chats:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1118,20 +1466,20 @@ app.get('/api/chats', verifyApiToken, async (req, res) => {
 app.get('/api/contacts', verifyApiToken, async (req, res) => {
     try {
         const client = clients.get(req.userId);
-        if (!client || !client.user) {
+        if (!client) {
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const contacts = Object.values(client.store?.contacts || {})
-            .filter(c => !c.id.endsWith('@g.us') && c.id !== 'status@broadcast')
+        const contacts = await client.getContacts();
+        const contactList = contacts
+            .filter(c => c.isMyContact && !c.isGroup)
             .map(c => ({
-                id: c.id,
-                name: c.name || c.notify || c.verifiedName || c.id.split('@')[0],
-                number: c.id.split('@')[0]
+                id: c.id._serialized,
+                name: c.name || c.pushname,
+                number: c.number
             }));
-        res.json(contacts);
+        res.json(contactList);
     } catch (error) {
-        console.error('Error fetching contacts:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1238,7 +1586,8 @@ app.get('/api/status', verifyAuth, async (req, res) => {
         let isConnected = false;
         
         if (client) {
-            isConnected = !!client.user;
+            const state = await client.getState();
+            isConnected = state === 'CONNECTED';
         }
         
         const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
@@ -1254,55 +1603,34 @@ app.get('/api/status', verifyAuth, async (req, res) => {
     }
 });
 
-// Cleanup stale clients periodically
-setInterval(() => {
-    const now = Date.now();
-    for (const [userId, timestamp] of qrTimestamps.entries()) {
-        if (now - timestamp > (QR_EXPIRATION_TIME + 30000)) { // 30 seconds after expiration
-            const state = connectionStates.get(userId);
-            if (state !== 'connected') {
-                console.log(`🧹 Cleaning up stale QR for user ${userId}`);
-                qrCodes.delete(userId);
-                qrTimestamps.delete(userId);
-            }
-        }
-    }
-}, 30000);
-
 // Cleanup on server shutdown
-process.on('SIGTERM', async () => {
-    console.log('🛑 SIGTERM received, cleaning up...');
-    for (const [userId, client] of clients.entries()) {
-        try {
-            client.ev.removeAllListeners();
-            client.ws?.close();
-            console.log(`✓ Destroyed client for user ${userId}`);
-        } catch (error) {
-            console.error(`✗ Error destroying client for user ${userId}:`, error);
-        }
-    }
-    process.exit(0);
-});
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
-process.on('SIGINT', async () => {
-    console.log('🛑 SIGINT received, cleaning up...');
+async function gracefulShutdown(signal) {
+    console.log(`🛑 ${signal} received, starting graceful shutdown...`);
+    
+    // Clear token cache
+    tokenCache.clear();
+    
+    // Destroy all WhatsApp clients
     for (const [userId, client] of clients.entries()) {
         try {
-            client.ev.removeAllListeners();
-            client.ws?.close();
-            console.log(`✓ Destroyed client for user ${userId}`);
+            console.log(`Destroying client for user ${userId}...`);
+            await client.destroy();
         } catch (error) {
-            console.error(`✗ Error destroying client for user ${userId}:`, error);
+            console.error(`Error destroying client for user ${userId}:`, error.message);
         }
     }
+    
+    console.log('✓ Graceful shutdown complete');
     process.exit(0);
-});
+}
 
 app.listen(PORT, () => {
     console.log(`✓ WhatsApp Server running on port ${PORT}`);
     console.log(`✓ Environment: ${NODE_ENV}`);
     console.log(`✓ PHP API URL: ${PHP_API_URL}`);
     console.log(`✓ Frontend URL: ${FRONTEND_URL}`);
-    console.log(`✓ QR Expiration Time: ${QR_EXPIRATION_TIME/1000} seconds`);
     console.log(`✓ Server ready to accept connections`);
 });
