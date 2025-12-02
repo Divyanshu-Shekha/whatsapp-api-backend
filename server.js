@@ -281,7 +281,6 @@ async function verifyApiToken(req, res, next) {
 }
 
 // Initialize WhatsApp Client for Device
-// Replace your initializeClientForUser function with this simplified version:
 async function initializeClientForUser(userId, token, forceNew = false) {
     const clientKey = userId;
     
@@ -291,7 +290,6 @@ async function initializeClientForUser(userId, token, forceNew = false) {
     }
 
     const initPromise = (async () => {
-        let client; // Declare client variable outside try block for cleanup
         try {
             clientInitializing.set(clientKey, true);
             console.log(`🔄 Starting client initialization for user ${userId}`);
@@ -299,6 +297,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             // Clean existing client if exists
             if (clients.has(clientKey)) {
                 const oldClient = clients.get(clientKey);
+                console.log(`🧹 Destroying existing client for user ${userId}`);
                 try {
                     await oldClient.destroy();
                 } catch (error) {
@@ -316,10 +315,13 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             if (forceNew) {
                 console.log(`🧹 Force cleaning auth data for user ${userId}`);
                 await cleanStaleAuthData(userId);
-                await new Promise(resolve => setTimeout(resolve, 10000));
+                // Wait a bit for cleanup to complete
+                await new Promise(resolve => setTimeout(resolve, 2000));
             }
 
-            client = new Client({
+            console.log(`🚀 Creating new WhatsApp client for user ${userId}`);
+            
+            const client = new Client({
                 authStrategy: new LocalAuth({ 
                     dataPath: './auth_data',
                     clientId: `user-${userId}`
@@ -336,78 +338,87 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                         '--single-process',
                         '--disable-gpu',
                         '--disable-web-resources'
-                    ],
-                    // ADD TIMEOUT HERE (30 seconds for browser launch)
-                    timeout: 30000
+                    ]
                 }
             });
 
             // QR Code handler
             client.once('qr', async (qr) => {
-                const qrData = await qrcode.toDataURL(qr);
-                qrCodes.set(clientKey, qrData);
-                console.log(`📱 QR Code generated for user ${userId}`);
+                console.log(`📱 QR Code received for user ${userId}`);
+                try {
+                    const qrData = await qrcode.toDataURL(qr);
+                    qrCodes.set(clientKey, qrData);
+                    console.log(`✅ QR Code generated and stored for user ${userId}`);
+                } catch (qrError) {
+                    console.error(`❌ Error generating QR code: ${qrError.message}`);
+                }
             });
 
             // Authentication handler
             client.once('authenticated', async () => {
-                console.log(`✅ User ${userId} authenticated`);
+                console.log(`✅ User ${userId} authenticated successfully`);
                 qrCodes.delete(clientKey);
+            });
+
+            // Ready handler
+            client.once('ready', async () => {
+                console.log(`✅ WhatsApp client ready for user ${userId}`);
+                try {
+                    const info = client.info;
+                    console.log(`📱 Client info: ${info.pushname} (${info.wid.user})`);
+                    
+                    // Update session in database
+                    await callPHPAPI('/whatsapp/session/update', 'POST', {
+                        phone_number: info.wid.user,
+                        pushname: info.pushname,
+                        is_active: true
+                    }, token);
+                    
+                    console.log(`✅ Database session updated for user ${userId}`);
+                } catch (error) {
+                    console.error(`❌ Error updating session: ${error.message}`);
+                }
             });
 
             // Configure heartbeat
             configureClientHeartbeat(client, userId, token);
 
-            console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
-            
-            // ADD TIMEOUT WRAPPER FOR CLIENT.INITIALIZE()
-            const INIT_TIMEOUT = 60000; // 60 seconds timeout
-            const initPromise = client.initialize();
-            
-            // Create a timeout promise
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => {
-                    reject(new Error(`WhatsApp client initialization timed out after ${INIT_TIMEOUT/1000} seconds`));
-                }, INIT_TIMEOUT);
-            });
-            
-            // Race between initialization and timeout
-            await Promise.race([initPromise, timeoutPromise]);
-            
-            // Check state after successful initialization
-            try {
-                const state = await client.getState();
-                console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
-                
-                // If we forced new but got connected without QR, that's OK for reconnection
-                if (state === 'CONNECTED' && forceNew) {
-                    console.log(`✅ Client reconnected successfully without QR scan`);
-                }
-            } catch (error) {
-                console.log(`⚠️ Error checking initial state: ${error.message}`);
-            }
+            console.log(`🚀 Initializing WhatsApp client...`);
+            await client.initialize();
+            console.log(`✅ Client initialization started for user ${userId}`);
             
             clients.set(clientKey, client);
             clientInitializing.delete(clientKey);
+            
+            // Wait a moment to see if we get a QR code or immediate connection
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Check initial state
+            try {
+                const state = await client.getState();
+                console.log(`📊 Initial client state for user ${userId}: ${state}`);
+            } catch (stateError) {
+                console.log(`⚠️ Could not check initial state: ${stateError.message}`);
+            }
+            
             console.log(`✅ Client successfully initialized for user ${userId}`);
             
             return client;
         } catch (error) {
-            console.error(`❌ Error initializing client for user ${userId}:`, error);
+            console.error(`❌ Error initializing client for user ${userId}:`, error.message);
+            
+            // Clean up everything on error
             clientInitializing.delete(clientKey);
             initializationPromises.delete(clientKey);
             eventListenersAttached.delete(clientKey);
             
-            // Clean up the client if it was created but initialization failed
-            if (client && typeof client.destroy === 'function') {
-                try {
-                    await client.destroy();
-                } catch (destroyError) {
-                    console.log(`Error cleaning up failed client: ${destroyError.message}`);
-                }
+            // Force clean auth data on error
+            try {
+                await cleanStaleAuthData(userId);
+            } catch (cleanError) {
+                console.error(`Error cleaning auth data: ${cleanError.message}`);
             }
             
-            await cleanStaleAuthData(userId);
             throw error;
         }
     })();
@@ -1448,26 +1459,19 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         
         // Check if already initializing
         if (initializationPromises.has(clientKey)) {
+            console.log(`⚠️ Initialization already in progress for user ${req.userId}`);
             return res.status(429).json({ 
                 error: 'Initialization already in progress',
-                message: 'Please wait for current initialization to complete'
+                message: 'Please wait for the current initialization to complete'
             });
         }
         
-        // Set overall request timeout (120 seconds)
-        const REQUEST_TIMEOUT = 120000;
+        console.log(`🔄 Proceeding with WhatsApp initialization for user ${req.userId}`);
         
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => {
-                reject(new Error(`Request timed out after ${REQUEST_TIMEOUT/1000} seconds`));
-            }, REQUEST_TIMEOUT);
-        });
-
-        // Race between initialization and timeout
-        await Promise.race([
-            initializeClientForUser(req.userId, req.token, true),
-            timeoutPromise
-        ]);
+        // Initialize client with forceNew = true
+        await initializeClientForUser(req.userId, req.token, true);
+        
+        console.log(`✅ Initialization process started for user ${req.userId}`);
         
         res.json({ 
             success: true, 
@@ -1475,15 +1479,7 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
         });
         
     } catch (error) {
-        console.error('Initialize error:', error);
-        
-        if (error.message.includes('timeout') || error.message.includes('timed out')) {
-            return res.status(504).json({ 
-                error: 'Initialization timeout',
-                message: 'WhatsApp initialization is taking too long. Please try again.',
-                details: error.message
-            });
-        }
+        console.error('Initialize error:', error.message);
         
         res.status(500).json({ 
             error: error.message,
