@@ -315,7 +315,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             if (forceNew) {
                 console.log(`🧹 Force cleaning auth data for user ${userId}`);
                 await cleanStaleAuthData(userId);
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 10000));
             }
 
             const client = new Client({
