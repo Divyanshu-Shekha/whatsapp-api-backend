@@ -93,7 +93,7 @@ async function callPHPAPI(endpoint, method = 'GET', data = null, token = null, r
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                timeout: 15000 // Increased timeout
+                // timeout: 15000 // Increased timeout
             };
 
             if (token) {
