@@ -291,6 +291,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
     }
 
     const initPromise = (async () => {
+        let client; // Declare client variable outside try block for cleanup
         try {
             clientInitializing.set(clientKey, true);
             console.log(`🔄 Starting client initialization for user ${userId}`);
@@ -318,7 +319,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 await new Promise(resolve => setTimeout(resolve, 10000));
             }
 
-            const client = new Client({
+            client = new Client({
                 authStrategy: new LocalAuth({ 
                     dataPath: './auth_data',
                     clientId: `user-${userId}`
@@ -335,7 +336,9 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                         '--single-process',
                         '--disable-gpu',
                         '--disable-web-resources'
-                    ]
+                    ],
+                    // ADD TIMEOUT HERE (30 seconds for browser launch)
+                    timeout: 30000
                 }
             });
 
@@ -356,9 +359,22 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             configureClientHeartbeat(client, userId, token);
 
             console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
-            await client.initialize();
             
-            // Check state after initialization
+            // ADD TIMEOUT WRAPPER FOR CLIENT.INITIALIZE()
+            const INIT_TIMEOUT = 60000; // 60 seconds timeout
+            const initPromise = client.initialize();
+            
+            // Create a timeout promise
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => {
+                    reject(new Error(`WhatsApp client initialization timed out after ${INIT_TIMEOUT/1000} seconds`));
+                }, INIT_TIMEOUT);
+            });
+            
+            // Race between initialization and timeout
+            await Promise.race([initPromise, timeoutPromise]);
+            
+            // Check state after successful initialization
             try {
                 const state = await client.getState();
                 console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
@@ -381,6 +397,16 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             clientInitializing.delete(clientKey);
             initializationPromises.delete(clientKey);
             eventListenersAttached.delete(clientKey);
+            
+            // Clean up the client if it was created but initialization failed
+            if (client && typeof client.destroy === 'function') {
+                try {
+                    await client.destroy();
+                } catch (destroyError) {
+                    console.log(`Error cleaning up failed client: ${destroyError.message}`);
+                }
+            }
+            
             await cleanStaleAuthData(userId);
             throw error;
         }
@@ -1428,38 +1454,34 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             });
         }
         
-        // Destroy existing client if exists
-        if (clients.has(clientKey)) {
-            const client = clients.get(clientKey);
-            console.log(`🧹 Destroying existing client for user ${req.userId}`);
-            try {
-                await client.destroy();
-            } catch (error) {
-                console.log(`Error destroying client: ${error.message}`);
-            }
-            clients.delete(clientKey);
-            eventListenersAttached.delete(clientKey);
-        }
+        // Set overall request timeout (120 seconds)
+        const REQUEST_TIMEOUT = 120000;
+        
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => {
+                reject(new Error(`Request timed out after ${REQUEST_TIMEOUT/1000} seconds`));
+            }, REQUEST_TIMEOUT);
+        });
 
-        // Clean up
-        qrCodes.delete(clientKey);
-        clientInitializing.delete(clientKey);
-
-        // Initialize client with forceNew = true to ensure fresh session
-        await initializeClientForUser(req.userId, req.token, true);
+        // Race between initialization and timeout
+        await Promise.race([
+            initializeClientForUser(req.userId, req.token, true),
+            timeoutPromise
+        ]);
         
         res.json({ 
             success: true, 
             message: 'WhatsApp client initializing, please scan QR code' 
         });
+        
     } catch (error) {
         console.error('Initialize error:', error);
         
-        // Check if it's a timeout or connection issue
-        if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+        if (error.message.includes('timeout') || error.message.includes('timed out')) {
             return res.status(504).json({ 
                 error: 'Initialization timeout',
-                message: 'WhatsApp initialization is taking too long. Please try again.'
+                message: 'WhatsApp initialization is taking too long. Please try again.',
+                details: error.message
             });
         }
         
