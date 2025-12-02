@@ -11,6 +11,8 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Environment variables
+// const PHP_API_URL = process.env.PHP_API_URL || 'http://localhost/whatsapp-api/api.php';
+// const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const PHP_API_URL = process.env.PHP_API_URL || 'https://imw-edu.com/whatsapp-api/api.php';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://imw-edu.com';
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -45,6 +47,8 @@ const qrCodes = new Map();
 const clientInitializing = new Map();
 const initializationPromises = new Map(); // NEW: Track ongoing initialization promises
 const eventListenersAttached = new Map(); // NEW: Track if listeners are already attached
+const deviceTokens = new Map(); // Map of token -> {userId, phoneNumber, deviceId}
+const userDevices = new Map(); // Map of userId -> [deviceIds]
 
 // Key improvements in server.js:
 
@@ -275,6 +279,431 @@ async function verifyApiToken(req, res, next) {
         });
     }
 }
+
+// Initialize WhatsApp Client for Device
+// Replace your initializeClientForUser function with this simplified version:
+async function initializeClientForUser(userId, token, forceNew = false) {
+    const clientKey = userId;
+    
+    if (initializationPromises.has(clientKey)) {
+        console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
+        return await initializationPromises.get(clientKey);
+    }
+
+    const initPromise = (async () => {
+        try {
+            clientInitializing.set(clientKey, true);
+            console.log(`🔄 Starting client initialization for user ${userId}`);
+
+            // Clean existing client if exists
+            if (clients.has(clientKey)) {
+                const oldClient = clients.get(clientKey);
+                try {
+                    await oldClient.destroy();
+                } catch (error) {
+                    console.log(`Error destroying old client: ${error.message}`);
+                }
+                clients.delete(clientKey);
+                eventListenersAttached.delete(clientKey);
+            }
+
+            // Clean QR code and state
+            qrCodes.delete(clientKey);
+            clientInitializing.delete(clientKey);
+
+            // Clean auth data if forceNew
+            if (forceNew) {
+                console.log(`🧹 Force cleaning auth data for user ${userId}`);
+                await cleanStaleAuthData(userId);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            const client = new Client({
+                authStrategy: new LocalAuth({ 
+                    dataPath: './auth_data',
+                    clientId: `user-${userId}`
+                }),
+                puppeteer: {
+                    headless: true,
+                    args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--no-first-run',
+                        '--no-zygote',
+                        '--single-process',
+                        '--disable-gpu',
+                        '--disable-web-resources'
+                    ]
+                }
+            });
+
+            // QR Code handler
+            client.once('qr', async (qr) => {
+                const qrData = await qrcode.toDataURL(qr);
+                qrCodes.set(clientKey, qrData);
+                console.log(`📱 QR Code generated for user ${userId}`);
+            });
+
+            // Authentication handler
+            client.once('authenticated', async () => {
+                console.log(`✅ User ${userId} authenticated`);
+                qrCodes.delete(clientKey);
+            });
+
+            // Configure heartbeat
+            configureClientHeartbeat(client, userId, token);
+
+            console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
+            await client.initialize();
+            
+            // Check state after initialization
+            try {
+                const state = await client.getState();
+                console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
+                
+                // If we forced new but got connected without QR, that's OK for reconnection
+                if (state === 'CONNECTED' && forceNew) {
+                    console.log(`✅ Client reconnected successfully without QR scan`);
+                }
+            } catch (error) {
+                console.log(`⚠️ Error checking initial state: ${error.message}`);
+            }
+            
+            clients.set(clientKey, client);
+            clientInitializing.delete(clientKey);
+            console.log(`✅ Client successfully initialized for user ${userId}`);
+            
+            return client;
+        } catch (error) {
+            console.error(`❌ Error initializing client for user ${userId}:`, error);
+            clientInitializing.delete(clientKey);
+            initializationPromises.delete(clientKey);
+            eventListenersAttached.delete(clientKey);
+            await cleanStaleAuthData(userId);
+            throw error;
+        }
+    })();
+
+    initializationPromises.set(clientKey, initPromise);
+
+    initPromise.finally(() => {
+        initializationPromises.delete(clientKey);
+    });
+
+    return await initPromise;
+}
+
+// Add Device - Associate token with phone number
+app.get('/api/devices', verifyAuth, async (req, res) => {
+    try {
+        const devices = await callPHPAPI('/devices/list', 'GET', null, req.token);
+        
+        // Enhance with real-time connection status
+        const enhancedDevices = devices.map(device => {
+            const clientKey = `${req.userId}-${device.device_id}`;
+            const isConnected = clients.has(clientKey);
+            let clientState = 'DISCONNECTED';
+            
+            if (isConnected) {
+                try {
+                    const client = clients.get(clientKey);
+                    // Don't await here, just check if client exists
+                    clientState = 'CONNECTED';
+                } catch (error) {
+                    clientState = 'ERROR';
+                }
+            }
+            
+            return {
+                ...device,
+                isConnected,
+                clientState
+            };
+        });
+
+        res.json(enhancedDevices);
+    } catch (error) {
+        console.error('Get devices error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+app.post('/api/devices/add', verifyAuth, async (req, res) => {
+    try {
+        const { token, phoneNumber, deviceName } = req.body;
+        
+        if (!token || !phoneNumber) {
+            return res.status(400).json({ error: 'Token and phone number are required' });
+        }
+
+        // Clean phone number
+        const cleanNumber = phoneNumber.replace(/[^\d]/g, '');
+
+        // Verify token exists in database and belongs to user
+        const tokenData = await callPHPAPI('/tokens/verify', 'POST', { token }, req.token);
+        
+        if (!tokenData || !tokenData.valid || tokenData.user_id !== req.userId) {
+            return res.status(400).json({ error: 'Invalid token or token does not belong to you' });
+        }
+
+        // Check if token is already assigned
+        try {
+            const existingDevice = await callPHPAPI('/devices/by-token', 'POST', { token }, req.token);
+            if (existingDevice && existingDevice.id) {
+                return res.status(400).json({ 
+                    error: 'This token is already assigned to: ' + (existingDevice.device_name || existingDevice.device_id)
+                });
+            }
+        } catch (error) {
+            // Token not assigned - this is good
+        }
+
+        const deviceId = `device-${Date.now()}`;
+        
+        // Store device-token mapping in memory
+        deviceTokens.set(token, {
+            userId: req.userId,
+            phoneNumber: cleanNumber,
+            deviceId: deviceId,
+            deviceName: deviceName || `Device ${cleanNumber}`,
+            createdAt: new Date(),
+            isActive: false
+        });
+
+        // Add to user's devices
+        if (!userDevices.has(req.userId)) {
+            userDevices.set(req.userId, []);
+        }
+        userDevices.get(req.userId).push(deviceId);
+
+        // Save to database
+        await callPHPAPI('/devices/add', 'POST', {
+            device_id: deviceId,
+            device_name: deviceName || `Device ${cleanNumber}`,
+            phone_number: cleanNumber,
+            token: token
+        }, req.token);
+
+        res.json({ 
+            success: true, 
+            deviceId,
+            message: 'Device added successfully' 
+        });
+    } catch (error) {
+        console.error('Add device error:', error);
+        
+        if (error.response?.data?.error) {
+            return res.status(error.response.status || 500).json({ 
+                error: error.response.data.error 
+            });
+        }
+        
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update device (for webhook URL, etc.)
+app.post('/api/devices/:deviceId/update', verifyAuth, async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        const { webhook_url, phone_number, pushname, is_active } = req.body;
+        
+        await callPHPAPI(`/devices/${deviceId}/update`, 'POST', {
+            webhook_url,
+            phone_number,
+            pushname,
+            is_active
+        }, req.token);
+
+        res.json({ 
+            success: true, 
+            message: 'Device updated successfully' 
+        });
+    } catch (error) {
+        console.error('Update device error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+// Get all devices for user
+app.get('/api/devices', verifyAuth, async (req, res) => {
+    try {
+        const devices = await callPHPAPI('/devices/list', 'GET', null, req.token);
+        
+        // Enhance with connection status
+        const enhancedDevices = devices.map(device => {
+            const isConnected = clients.has(`${req.userId}-${device.device_id}`);
+            return {
+                ...device,
+                isConnected,
+                clientState: isConnected ? 'CONNECTED' : 'DISCONNECTED'
+            };
+        });
+
+        res.json(enhancedDevices);
+    } catch (error) {
+        console.error('Get devices error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Initialize WhatsApp for specific device
+app.post('/api/devices/:deviceId/initialize', verifyAuth, async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        
+        // Get device info from database
+        const device = await callPHPAPI(`/devices/${deviceId}`, 'GET', null, req.token);
+        
+        if (!device) {
+            return res.status(404).json({ error: 'Device not found' });
+        }
+
+        const clientKey = `${req.userId}-${deviceId}`;
+        
+        // Check if already initializing
+        if (initializationPromises.has(clientKey)) {
+            return res.status(409).json({ 
+                error: 'Initialization already in progress',
+                message: 'Please wait for the current initialization to complete'
+            });
+        }
+
+        // Clean existing client
+        if (clients.has(clientKey)) {
+            const client = clients.get(clientKey);
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.log(`Error destroying client: ${error.message}`);
+            }
+            clients.delete(clientKey);
+            eventListenersAttached.delete(clientKey);
+        }
+
+        qrCodes.delete(clientKey);
+        clientInitializing.delete(clientKey);
+
+        // Clean auth data
+        await cleanStaleAuthData(`${req.userId}-${deviceId}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Initialize client for this device
+        await initializeClientForDevice(req.userId, deviceId, device.phone_number, req.token, true);
+        
+        res.json({ 
+            success: true, 
+            message: 'Device initializing, please scan QR code',
+            deviceId 
+        });
+    } catch (error) {
+        console.error('Device initialize error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get QR code for specific device
+app.get('/api/devices/:deviceId/qr', verifyAuth, async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        const clientKey = `${req.userId}-${deviceId}`;
+        
+        const client = clients.get(clientKey);
+        
+        if (client) {
+            try {
+                const state = await client.getState();
+                
+                if (state === 'CONNECTED') {
+                    const device = await callPHPAPI(`/devices/${deviceId}`, 'GET', null, req.token);
+                    return res.json({ 
+                        qr: null, 
+                        ready: true, 
+                        device 
+                    });
+                }
+            } catch (error) {
+                console.log(`Error checking client state: ${error.message}`);
+            }
+        }
+
+        const qr = qrCodes.get(clientKey);
+        
+        res.json({ 
+            qr: qr || null, 
+            ready: false,
+            deviceId
+        });
+    } catch (error) {
+        console.error('QR fetch error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Disconnect specific device
+app.post('/api/devices/:deviceId/disconnect', verifyAuth, async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        const clientKey = `${req.userId}-${deviceId}`;
+        
+        const client = clients.get(clientKey);
+        
+        if (client) {
+            await safeDestroyClient(client, clientKey);
+        }
+
+        clients.delete(clientKey);
+        qrCodes.delete(clientKey);
+        clientInitializing.delete(clientKey);
+        initializationPromises.delete(clientKey);
+
+        // Update database
+        await callPHPAPI(`/devices/${deviceId}/disconnect`, 'POST', {}, req.token);
+
+        // Clean auth data
+        await cleanStaleAuthData(`${req.userId}-${deviceId}`);
+        
+        res.json({ 
+            success: true, 
+            message: 'Device disconnected successfully' 
+        });
+        
+    } catch (error) {
+        console.error('Device disconnect error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete device
+app.delete('/api/devices/:deviceId', verifyAuth, async (req, res) => {
+    try {
+        const { deviceId } = req.params;
+        const clientKey = `${req.userId}-${deviceId}`;
+        
+        // Disconnect if connected
+        const client = clients.get(clientKey);
+        if (client) {
+            await safeDestroyClient(client, clientKey);
+        }
+
+        // Clean up
+        clients.delete(clientKey);
+        qrCodes.delete(clientKey);
+        
+        // Remove from database
+        await callPHPAPI(`/devices/${deviceId}`, 'DELETE', null, req.token);
+
+        res.json({ 
+            success: true, 
+            message: 'Device deleted successfully' 
+        });
+    } catch (error) {
+        console.error('Delete device error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 app.get('/api/auth/check-token', async (req, res) => {
     try {
@@ -770,6 +1199,28 @@ function configureClientHeartbeat(client, userId, token) {
     return { startHeartbeat, stopHeartbeat };
 }
 
+function getRandomConnectedDevice(userId, devices) {
+    // Get all connected devices for this user
+    const connectedDevices = devices.filter(device => {
+        const clientKey = `${userId}-${device.device_id}`;
+        const client = clients.get(clientKey);
+        if (!client) return false;
+        
+        try {
+            // Quick check if client exists and is likely connected
+            return client.pupBrowser?.isConnected?.() !== false;
+        } catch {
+            return false;
+        }
+    });
+    
+    if (connectedDevices.length === 0) return null;
+    
+    // Return random device
+    const randomIndex = Math.floor(Math.random() * connectedDevices.length);
+    return connectedDevices[randomIndex];
+}
+
 // Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
     // Check if initialization is already in progress
@@ -967,50 +1418,34 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
     try {
         console.log(`📱 Initialize request for user ${req.userId}`);
         
+        const clientKey = req.userId;
+        
         // Check if already initializing
-        if (initializationPromises.has(req.userId)) {
-            console.log(`⚠️ Initialization already in progress for user ${req.userId}`);
-            return res.status(409).json({ 
+        if (initializationPromises.has(clientKey)) {
+            return res.status(429).json({ 
                 error: 'Initialization already in progress',
-                message: 'Please wait for the current initialization to complete'
+                message: 'Please wait for current initialization to complete'
             });
         }
         
-        // Destroy existing client first
-        if (clients.has(req.userId)) {
-            const client = clients.get(req.userId);
+        // Destroy existing client if exists
+        if (clients.has(clientKey)) {
+            const client = clients.get(clientKey);
             console.log(`🧹 Destroying existing client for user ${req.userId}`);
             try {
                 await client.destroy();
             } catch (error) {
-                console.log(`✗ Error destroying client: ${error.message}`);
+                console.log(`Error destroying client: ${error.message}`);
             }
-            clients.delete(req.userId);
-            eventListenersAttached.delete(req.userId);
+            clients.delete(clientKey);
+            eventListenersAttached.delete(clientKey);
         }
 
-        // Clean QR codes and state
-        qrCodes.delete(req.userId);
-        clientInitializing.delete(req.userId);
+        // Clean up
+        qrCodes.delete(clientKey);
+        clientInitializing.delete(clientKey);
 
-        // Check and clean database session
-        try {
-            const session = await callPHPAPI('/whatsapp/session/get', 'GET', null, req.token);
-            if (session?.is_active) {
-                console.log(`🧹 Cleaning database session for user ${req.userId}`);
-                await callPHPAPI('/whatsapp/session/disconnect', 'POST', {}, req.token);
-            }
-        } catch (error) {
-            console.log(`No database session to clean for user ${req.userId}`);
-        }
-
-        // Clean auth data
-        console.log(`🧹 Cleaning auth data for user ${req.userId}`);
-        await cleanStaleAuthData(req.userId);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Initialize fresh client
-        console.log(`🔄 Starting FRESH WhatsApp initialization for user ${req.userId}`);
+        // Initialize client with forceNew = true to ensure fresh session
         await initializeClientForUser(req.userId, req.token, true);
         
         res.json({ 
@@ -1018,8 +1453,20 @@ app.post('/api/whatsapp/initialize', verifyAuth, async (req, res) => {
             message: 'WhatsApp client initializing, please scan QR code' 
         });
     } catch (error) {
-        console.error('✗ Initialize error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('Initialize error:', error);
+        
+        // Check if it's a timeout or connection issue
+        if (error.message.includes('timeout') || error.message.includes('Timeout')) {
+            return res.status(504).json({ 
+                error: 'Initialization timeout',
+                message: 'WhatsApp initialization is taking too long. Please try again.'
+            });
+        }
+        
+        res.status(500).json({ 
+            error: error.message,
+            message: 'Failed to initialize WhatsApp. Please try again.'
+        });
     }
 });
 
@@ -1280,6 +1727,8 @@ app.post('/api/whatsapp/force-cleanup', verifyAuth, async (req, res) => {
 });
 
 // Messaging Routes - Accept both JWT and API tokens
+// Replace the existing send-message route
+// Also fix the send message route error handling
 app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
         const { number, message } = req.body;
@@ -1287,24 +1736,29 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         if (!number || !message) {
             return res.status(400).json({ error: 'Number and message are required' });
         }
-        
+
         const client = clients.get(req.userId);
 
         if (!client) {
             return res.status(400).json({ 
                 error: 'WhatsApp not connected',
-                details: 'Please connect your WhatsApp first'
+                details: 'Please connect to WhatsApp first',
+                code: 'NOT_CONNECTED'
             });
         }
 
         const state = await client.getState();
         if (state !== 'CONNECTED') {
-            return res.status(400).json({ error: 'WhatsApp not ready to send messages' });
+            return res.status(400).json({ 
+                error: 'WhatsApp not ready',
+                state: state,
+                code: 'NOT_READY'
+            });
         }
 
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
         
-        console.log(`📤 Sending message to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
+        console.log(`📤 Sending message to ${chatId} (User: ${req.userId})`);
         const sentMessage = await client.sendMessage(chatId, message);
         console.log(`✓ Message sent successfully: ${sentMessage.id.id}`);
 
@@ -1318,9 +1772,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
 
         const myInfo = client.info;
 
-        // Use API token if available, otherwise use JWT
-        const authToken = req.authType === 'api_token' ? req.token : req.token;
-
+        const authToken = req.token;
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
             message_id: sentMessage.id.id,
             type: 'sent',
@@ -1343,26 +1795,33 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             success: true, 
             message: 'Message sent successfully',
             messageId: sentMessage.id.id,
-            dbId: savedMessage.id
+            dbId: savedMessage?.id || null
         });
     } catch (error) {
-        console.error('✗ Error sending message:', error);
+        console.error('✗ Error sending message:', error.message);
         
         try {
-            const authToken = req.authType === 'api_token' ? req.token : req.token;
+            const authToken = req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
             }, authToken);
-        } catch (e) {}
+        } catch (e) {
+            console.error('Failed to update stats:', e.message);
+        }
         
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Failed to send message',
+            code: 'SEND_MESSAGE_ERROR'
+        });
     }
 });
 
+
 app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, res) => {
     try {
-        const { number, caption } = req.body;
+        const { number, caption, deviceId } = req.body;
         
         if (!number) {
             return res.status(400).json({ error: 'Number is required' });
@@ -1371,17 +1830,60 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
         if (!req.file) {
             return res.status(400).json({ error: 'No file uploaded' });
         }
-        
-        const client = clients.get(req.userId);
+
+        let clientKey;
+        let client;
+        let actualDeviceId = deviceId;
+        let selectedDevice;
+
+        // Get all user's devices
+        const authToken = req.token;
+        const userDevices = await callPHPAPI('/devices/list', 'GET', null, authToken);
+
+        if (req.authType === 'api_token') {
+            const deviceData = await callPHPAPI('/devices/by-token', 'POST', 
+                { token: req.token }, 
+                authToken
+            );
+
+            if (deviceData && deviceData.device_id) {
+                actualDeviceId = deviceData.device_id;
+                clientKey = `${req.userId}-${deviceData.device_id}`;
+                client = clients.get(clientKey);
+                selectedDevice = deviceData;
+            } else {
+                selectedDevice = getRandomConnectedDevice(req.userId, userDevices);
+                if (!selectedDevice) {
+                    return res.status(400).json({ error: 'No connected devices found' });
+                }
+                actualDeviceId = selectedDevice.device_id;
+                clientKey = `${req.userId}-${selectedDevice.device_id}`;
+                client = clients.get(clientKey);
+            }
+        } else {
+            if (deviceId) {
+                clientKey = `${req.userId}-${deviceId}`;
+                client = clients.get(clientKey);
+                selectedDevice = userDevices.find(d => d.device_id === deviceId);
+            } else {
+                selectedDevice = getRandomConnectedDevice(req.userId, userDevices);
+                if (!selectedDevice) {
+                    return res.status(400).json({ error: 'No connected devices found' });
+                }
+                actualDeviceId = selectedDevice.device_id;
+                clientKey = `${req.userId}-${selectedDevice.device_id}`;
+                client = clients.get(clientKey);
+            }
+        }
 
         if (!client) {
-            return res.status(400).json({ error: 'WhatsApp not connected' });
+            return res.status(400).json({ error: 'Device not connected' });
         }
 
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
         const media = MessageMedia.fromFilePath(req.file.path);
         
-        console.log(`📤 Sending media to ${chatId} for user ${req.userId} (Auth: ${req.authType})`);
+        console.log(`📤 Sending media to ${chatId} from device ${selectedDevice?.device_name || actualDeviceId}`);
         const sentMessage = await client.sendMessage(chatId, media, { caption });
         console.log(`✓ Media sent successfully: ${sentMessage.id.id}`);
 
@@ -1395,7 +1897,6 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
 
         const myInfo = client.info;
         const mediaType = req.file.mimetype.split('/')[0];
-        const authToken = req.authType === 'api_token' ? req.token : req.token;
 
         const savedMessage = await callPHPAPI('/messages/save', 'POST', {
             message_id: sentMessage.id.id,
@@ -1409,7 +1910,8 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             media_type: mediaType,
             media_url: `/uploads/${req.file.filename}`,
             status: 'sent',
-            timestamp: sentMessage.timestamp
+            timestamp: sentMessage.timestamp,
+            device_id: actualDeviceId
         }, authToken);
 
         await callPHPAPI('/stats/update', 'POST', {
@@ -1417,11 +1919,37 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
             increment: 1
         }, authToken);
 
+        await callPHPAPI(`/devices/${actualDeviceId}/update-stats`, 'POST', {
+            field: 'sent',
+            increment: 1
+        }, authToken);
+
+        // Send webhook notification
+        if (selectedDevice?.webhook_url) {
+            try {
+                await axios.post(selectedDevice.webhook_url, {
+                    event: 'media_sent',
+                    message_id: sentMessage.id.id,
+                    from: myInfo.wid.user,
+                    to: number,
+                    caption: caption,
+                    media_type: mediaType,
+                    timestamp: sentMessage.timestamp,
+                    device_id: actualDeviceId,
+                    device_name: selectedDevice.device_name
+                }, { timeout: 5000 });
+            } catch (webhookError) {
+                console.error(`✗ Webhook failed: ${webhookError.message}`);
+            }
+        }
+
         res.json({ 
             success: true, 
             message: 'Media sent successfully',
             messageId: sentMessage.id.id,
-            dbId: savedMessage.id
+            dbId: savedMessage.id,
+            deviceId: actualDeviceId,
+            deviceName: selectedDevice?.device_name || 'Unknown'
         });
     } catch (error) {
         console.error('✗ Error sending media:', error);
@@ -1431,11 +1959,10 @@ app.post('/api/send-media', verifyAnyToken, upload.single('file'), async (req, r
         }
         
         try {
-            const authToken = req.authType === 'api_token' ? req.token : req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
-            }, authToken);
+            }, req.token);
         } catch (e) {}
         
         res.status(500).json({ success: false, error: error.message });
