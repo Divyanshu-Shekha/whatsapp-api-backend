@@ -1169,56 +1169,76 @@ function configureClientHeartbeat(client, userId, token) {
     });
 
     // ✅ Message handler - keep reference
-    client.on('message', async (message) => {
+   // Replace your message handler in the configureClientHeartbeat function
+// with this updated version that handles the error gracefully
+
+client.on('message', async (message) => {
+    try {
+        // Get contact with error handling
+        let contact;
         try {
-            const contact = await message.getContact();
-            const myInfo = client.info;
-
-            await callPHPAPI('/stats/update', 'POST', {
-                field: 'received',
-                increment: 1
-            }, token);
-
-            const hasMedia = message.hasMedia;
-            let mediaType = null;
-            let mediaUrl = null;
-
-            if (hasMedia) {
-                try {
-                    const media = await message.downloadMedia();
-                    if (media) {
-                        mediaType = media.mimetype.split('/')[0];
-                        const extension = media.mimetype.split('/')[1] || 'bin';
-                        const filename = `${Date.now()}_${message.id.id}.${extension}`;
-                        const filepath = path.join('uploads', filename);
-                        fs.writeFileSync(filepath, media.data, 'base64');
-                        mediaUrl = `/uploads/${filename}`;
-                    }
-                } catch (mediaError) {
-                    console.error('✗ Error downloading media:', mediaError);
-                }
-            }
-
-            await callPHPAPI('/messages/save', 'POST', {
-                message_id: message.id.id,
-                type: 'received',
-                from_number: contact.number,
-                from_name: contact.name || contact.pushname || contact.number,
-                to_number: myInfo.wid.user,
-                to_name: myInfo.pushname,
-                message_body: message.body || null,
-                has_media: hasMedia,
-                media_type: mediaType,
-                media_url: mediaUrl,
-                status: 'received',
-                timestamp: message.timestamp
-            }, token);
-
-            console.log(`✓ Message saved for user ${userId}`);
-        } catch (error) {
-            console.error('✗ Error saving received message:', error);
+            contact = await message.getContact();
+        } catch (contactError) {
+            console.log(`⚠️ Could not get contact, using fallback: ${contactError.message}`);
+            // Fallback: create minimal contact object
+            contact = {
+                number: message.from.replace('@c.us', ''),
+                name: null,
+                pushname: message._data?.notifyName || null
+            };
         }
-    });
+
+        const myInfo = client.info;
+
+        await callPHPAPI('/stats/update', 'POST', {
+            field: 'received',
+            increment: 1
+        }, token);
+
+        const hasMedia = message.hasMedia;
+        let mediaType = null;
+        let mediaUrl = null;
+
+        if (hasMedia) {
+            try {
+                const media = await message.downloadMedia();
+                if (media) {
+                    mediaType = media.mimetype.split('/')[0];
+                    const extension = media.mimetype.split('/')[1] || 'bin';
+                    const filename = `${Date.now()}_${message.id.id}.${extension}`;
+                    const filepath = path.join('uploads', filename);
+                    fs.writeFileSync(filepath, media.data, 'base64');
+                    mediaUrl = `/uploads/${filename}`;
+                }
+            } catch (mediaError) {
+                console.error('✗ Error downloading media:', mediaError.message);
+            }
+        }
+
+        // Safe contact name extraction
+        const fromName = contact.name || contact.pushname || contact.number || 'Unknown';
+
+        await callPHPAPI('/messages/save', 'POST', {
+            message_id: message.id.id,
+            type: 'received',
+            from_number: contact.number,
+            from_name: fromName,
+            to_number: myInfo.wid.user,
+            to_name: myInfo.pushname,
+            message_body: message.body || null,
+            has_media: hasMedia,
+            media_type: mediaType,
+            media_url: mediaUrl,
+            status: 'received',
+            timestamp: message.timestamp
+        }, token);
+
+        console.log(`✓ Message saved for user ${userId}`);
+    } catch (error) {
+        console.error('✗ Error saving received message:', error.message);
+        // Don't throw - just log the error to prevent handler crashes
+    }
+});
 
     // ✅ Override destroy method
     const originalDestroy = client.destroy.bind(client);
