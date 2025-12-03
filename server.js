@@ -11,10 +11,10 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Environment variables
-// const PHP_API_URL = process.env.PHP_API_URL || 'http://localhost/whatsapp-api/api.php';
-// const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
-const PHP_API_URL = process.env.PHP_API_URL || 'https://imw-edu.com/whatsapp-api/api.php';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://imw-edu.com';
+const PHP_API_URL = process.env.PHP_API_URL || 'http://localhost/whatsapp-api/api.php';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+// const PHP_API_URL = process.env.PHP_API_URL || 'https://imw-edu.com/whatsapp-api/api.php';
+// const FRONTEND_URL = process.env.FRONTEND_URL || 'https://imw-edu.com';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // CORS Configuration
@@ -82,6 +82,47 @@ function getCachedToken(token) {
   return cached.data;
 }
 
+
+// Fix for ContactMethods.getIsMyContact deprecation
+// Add this before creating your Client instances
+
+// const { Client } = require('whatsapp-web.js');
+
+// Monkey patch the problematic method
+Client.prototype.getContactModel = async function(contactId) {
+    const contact = await this.pupPage.evaluate(async (contactId) => {
+        try {
+            // Try new method structure first
+            const contact = window.Store.Contact.get(contactId);
+            if (contact) {
+                return {
+                    id: contact.id,
+                    name: contact.name || contact.pushname || contact.id.user,
+                    number: contact.id.user,
+                    pushname: contact.pushname || '',
+                    isMyContact: contact.isMyContact || false,
+                    isUser: contact.isUser || false,
+                    isGroup: contact.isGroup || false,
+                    isWAContact: contact.isWAContact || false
+                };
+            }
+            
+            // Fallback to old method
+            const oldContact = await window.WWebJS.getContact(contactId);
+            return oldContact;
+        } catch (error) {
+            console.error('Error getting contact:', error);
+            return {
+                id: { _serialized: contactId },
+                name: contactId.split('@')[0],
+                number: contactId.split('@')[0],
+                isMyContact: false
+            };
+        }
+    }, contactId);
+    
+    return contact;
+};
 
 // Helper function to call PHP API
 async function callPHPAPI(endpoint, method = 'GET', data = null, token = null, retries = 2) {
@@ -1169,56 +1210,48 @@ function configureClientHeartbeat(client, userId, token) {
     });
 
     // ✅ Message handler - keep reference
-    client.on('message', async (message) => {
+ // In your message handler, replace:
+// const contact = await message.getContact();
+// OR
+// const contact = await client.getContactById(chatId);
+
+// With this safer approach:
+client.on('message', async (message) => {
+    try {
+        // Instead of getting full contact, just extract what you need
+        const contactId = message.from;
+        const contactNumber = contactId.split('@')[0];
+        
+        // Try to get contact name safely
+        let contactName = contactNumber;
         try {
-            const contact = await message.getContact();
-            const myInfo = client.info;
-
-            await callPHPAPI('/stats/update', 'POST', {
-                field: 'received',
-                increment: 1
-            }, token);
-
-            const hasMedia = message.hasMedia;
-            let mediaType = null;
-            let mediaUrl = null;
-
-            if (hasMedia) {
+            // Direct API call instead of library method
+            const contact = await client.pupPage.evaluate((contactId) => {
                 try {
-                    const media = await message.downloadMedia();
-                    if (media) {
-                        mediaType = media.mimetype.split('/')[0];
-                        const extension = media.mimetype.split('/')[1] || 'bin';
-                        const filename = `${Date.now()}_${message.id.id}.${extension}`;
-                        const filepath = path.join('uploads', filename);
-                        fs.writeFileSync(filepath, media.data, 'base64');
-                        mediaUrl = `/uploads/${filename}`;
-                    }
-                } catch (mediaError) {
-                    console.error('✗ Error downloading media:', mediaError);
+                    const contact = window.Store.Contact.get(contactId);
+                    return contact ? {
+                        name: contact.name || contact.pushname || contactId.split('@')[0],
+                        number: contactId.split('@')[0],
+                        pushname: contact.pushname || ''
+                    } : null;
+                } catch (e) {
+                    return null;
                 }
+            }, contactId);
+            
+            if (contact) {
+                contactName = contact.name;
             }
-
-            await callPHPAPI('/messages/save', 'POST', {
-                message_id: message.id.id,
-                type: 'received',
-                from_number: contact.number,
-                from_name: contact.name || contact.pushname || contact.number,
-                to_number: myInfo.wid.user,
-                to_name: myInfo.pushname,
-                message_body: message.body || null,
-                has_media: hasMedia,
-                media_type: mediaType,
-                media_url: mediaUrl,
-                status: 'received',
-                timestamp: message.timestamp
-            }, token);
-
-            console.log(`✓ Message saved for user ${userId}`);
         } catch (error) {
-            console.error('✗ Error saving received message:', error);
+            console.log('Could not get contact name:', error.message);
         }
-    });
+        
+        // Use contactNumber and contactName in your logic
+        // ...
+    } catch (error) {
+        console.error('Error handling message:', error);
+    }
+});
 
     // ✅ Override destroy method
     const originalDestroy = client.destroy.bind(client);

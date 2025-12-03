@@ -20,7 +20,7 @@
     "mysql2": "^3.6.5",
     "pino": "^10.1.0",
     "qrcode": "^1.5.4",
-    "whatsapp-web.js": "^1.34.2"
+    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
