@@ -1169,76 +1169,56 @@ function configureClientHeartbeat(client, userId, token) {
     });
 
     // ✅ Message handler - keep reference
-   // Replace your message handler in the configureClientHeartbeat function
-// with this updated version that handles the error gracefully
-
-client.on('message', async (message) => {
-    try {
-        // Get contact with error handling
-        let contact;
+    client.on('message', async (message) => {
         try {
-            contact = await message.getContact();
-        } catch (contactError) {
-            console.log(`⚠️ Could not get contact, using fallback: ${contactError.message}`);
-            // Fallback: create minimal contact object
-            contact = {
-                number: message.from.replace('@c.us', ''),
-                name: null,
-                pushname: message._data?.notifyName || null
-            };
-        }
+            const contact = await message.getContact();
+            const myInfo = client.info;
 
-        const myInfo = client.info;
+            await callPHPAPI('/stats/update', 'POST', {
+                field: 'received',
+                increment: 1
+            }, token);
 
-        await callPHPAPI('/stats/update', 'POST', {
-            field: 'received',
-            increment: 1
-        }, token);
+            const hasMedia = message.hasMedia;
+            let mediaType = null;
+            let mediaUrl = null;
 
-        const hasMedia = message.hasMedia;
-        let mediaType = null;
-        let mediaUrl = null;
-
-        if (hasMedia) {
-            try {
-                const media = await message.downloadMedia();
-                if (media) {
-                    mediaType = media.mimetype.split('/')[0];
-                    const extension = media.mimetype.split('/')[1] || 'bin';
-                    const filename = `${Date.now()}_${message.id.id}.${extension}`;
-                    const filepath = path.join('uploads', filename);
-                    fs.writeFileSync(filepath, media.data, 'base64');
-                    mediaUrl = `/uploads/${filename}`;
+            if (hasMedia) {
+                try {
+                    const media = await message.downloadMedia();
+                    if (media) {
+                        mediaType = media.mimetype.split('/')[0];
+                        const extension = media.mimetype.split('/')[1] || 'bin';
+                        const filename = `${Date.now()}_${message.id.id}.${extension}`;
+                        const filepath = path.join('uploads', filename);
+                        fs.writeFileSync(filepath, media.data, 'base64');
+                        mediaUrl = `/uploads/${filename}`;
+                    }
+                } catch (mediaError) {
+                    console.error('✗ Error downloading media:', mediaError);
                 }
-            } catch (mediaError) {
-                console.error('✗ Error downloading media:', mediaError.message);
             }
+
+            await callPHPAPI('/messages/save', 'POST', {
+                message_id: message.id.id,
+                type: 'received',
+                from_number: contact.number,
+                from_name: contact.name || contact.pushname || contact.number,
+                to_number: myInfo.wid.user,
+                to_name: myInfo.pushname,
+                message_body: message.body || null,
+                has_media: hasMedia,
+                media_type: mediaType,
+                media_url: mediaUrl,
+                status: 'received',
+                timestamp: message.timestamp
+            }, token);
+
+            console.log(`✓ Message saved for user ${userId}`);
+        } catch (error) {
+            console.error('✗ Error saving received message:', error);
         }
-
-        // Safe contact name extraction
-        const fromName = contact.name || contact.pushname || contact.number || 'Unknown';
-
-        await callPHPAPI('/messages/save', 'POST', {
-            message_id: message.id.id,
-            type: 'received',
-            from_number: contact.number,
-            from_name: fromName,
-            to_number: myInfo.wid.user,
-            to_name: myInfo.pushname,
-            message_body: message.body || null,
-            has_media: hasMedia,
-            media_type: mediaType,
-            media_url: mediaUrl,
-            status: 'received',
-            timestamp: message.timestamp
-        }, token);
-
-        console.log(`✓ Message saved for user ${userId}`);
-    } catch (error) {
-        console.error('✗ Error saving received message:', error.message);
-        // Don't throw - just log the error to prevent handler crashes
-    }
-});
+    });
 
     // ✅ Override destroy method
     const originalDestroy = client.destroy.bind(client);
@@ -2028,6 +2008,8 @@ app.get('/api/chats', verifyApiToken, async (req, res) => {
     }
 });
 
+// Replace your /api/contacts endpoint with this safer version
+
 app.get('/api/contacts', verifyApiToken, async (req, res) => {
     try {
         const client = clients.get(req.userId);
@@ -2035,17 +2017,25 @@ app.get('/api/contacts', verifyApiToken, async (req, res) => {
             return res.status(400).json({ error: 'WhatsApp not connected' });
         }
 
-        const contacts = await client.getContacts();
-        const contactList = contacts
-            .filter(c => c.isMyContact && !c.isGroup)
-            .map(c => ({
-                id: c.id._serialized,
-                name: c.name || c.pushname,
-                number: c.number
+        // Get chats instead of contacts (more reliable)
+        const chats = await client.getChats();
+        
+        const contactList = chats
+            .filter(chat => !chat.isGroup) // Only individual chats
+            .map(chat => ({
+                id: chat.id._serialized,
+                name: chat.name,
+                number: chat.id.user,
+                pushname: chat.contact?.pushname || chat.name
             }));
+        
         res.json(contactList);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('✗ Error getting contacts:', error.message);
+        res.status(500).json({ 
+            error: 'Could not retrieve contacts',
+            details: error.message 
+        });
     }
 });
 
