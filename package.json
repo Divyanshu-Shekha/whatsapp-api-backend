@@ -4,7 +4,7 @@
   "description": "WhatsApp API with MySQL Authentication",
   "main": "server.js",
   "scripts": {
-    "dev": "nodemon server.js"
+    "dev": "node server.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
