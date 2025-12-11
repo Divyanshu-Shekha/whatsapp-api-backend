@@ -666,7 +666,7 @@ app.post('/api/devices/:deviceId/initialize', verifyAuth, async (req, res) => {
 
         // Clean auth data
         await cleanStaleAuthData(`${req.userId}-${deviceId}`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // await new Promise(resolve => setTimeout(resolve, 1000));
 
         // Initialize client for this device
         await initializeClientForDevice(req.userId, deviceId, device.phone_number, req.token, true);
