@@ -4,8 +4,10 @@
   "description": "WhatsApp API with MySQL Authentication",
   "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "dev": "node server.js",
-    "build": "npm install && apt-get update && apt-get install -y chromium-browser"
+    "build": "apt-get update && apt-get install -y wget gnupg && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list && apt-get update && apt-get install -y google-chrome-stable fonts-freefont-ttf libxss1 && ln -sf /usr/bin/google-chrome-stable /usr/bin/chrome && npm install",
+    "postinstall": "echo 'Chrome installation completed'"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

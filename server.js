@@ -7,6 +7,29 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 
+function getChromePath() {
+  // Check common Chrome paths
+  const possiblePaths = [
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/usr/local/bin/chrome",
+    process.env.CHROME_PATH,
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+  ];
+
+  for (const path of possiblePaths) {
+    if (path && fs.existsSync(path)) {
+      debugLog(`Found Chrome at: ${path}`);
+      return path;
+    }
+  }
+
+  debugLog("Chrome not found in standard paths");
+  return null;
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -14,7 +37,8 @@ const PORT = process.env.PORT || 5000;
 // const PHP_API_URL =
 //   process.env.PHP_API_URL || "http://localhost/whatsapp-api/api.php";
 // const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
-const PHP_API_URL = process.env.PHP_API_URL || "https://sendwatsapp.in/whatsapp-api/api.php";
+const PHP_API_URL =
+  process.env.PHP_API_URL || "https://sendwatsapp.in/whatsapp-api/api.php";
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://sendwatsapp.in";
 const NODE_ENV = process.env.NODE_ENV || "development";
 
@@ -475,7 +499,11 @@ async function initializeClientForUser(userId, token, forceNew = false) {
           clientId: `user-${userId}`,
         }),
         puppeteer: {
-          headless: true,
+          headless: "new",
+          executablePath:
+            getChromePath() ||
+            process.env.CHROME_PATH ||
+            "/usr/bin/google-chrome-stable",
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -486,7 +514,12 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             "--single-process",
             "--disable-gpu",
             "--disable-web-resources",
+            "--remote-debugging-port=9222",
+            "--remote-debugging-address=0.0.0.0",
           ],
+          timeout: 60000,
+          // Prevent Puppeteer from trying to download Chrome
+          channel: "chrome",
         },
       });
 
@@ -1454,195 +1487,231 @@ function getRandomConnectedDevice(userId, devices) {
 
 // Initialize WhatsApp Client
 async function initializeClientForUser(userId, token, forceNew = false) {
-    // Check if initialization is already in progress
-    if (initializationPromises.has(userId)) {
-        console.log(`⏳ Client initialization already in progress for user ${userId}, reusing promise...`);
-        return await initializationPromises.get(userId);
-    }
+  // Check if initialization is already in progress
+  if (initializationPromises.has(userId)) {
+    console.log(
+      `⏳ Client initialization already in progress for user ${userId}, reusing promise...`,
+    );
+    return await initializationPromises.get(userId);
+  }
 
-    // Create initialization promise
-    const initPromise = (async () => {
-        try {
-            clientInitializing.set(userId, true);
-            console.log(`🔄 Starting client initialization for user ${userId} (forceNew: ${forceNew})`);
+  // Create initialization promise
+  const initPromise = (async () => {
+    try {
+      clientInitializing.set(userId, true);
+      console.log(
+        `🔄 Starting client initialization for user ${userId} (forceNew: ${forceNew})`,
+      );
 
-            if (forceNew) {
-                console.log(`🧹 Force cleaning auth data for user ${userId}`);
-                await cleanStaleAuthData(userId);
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                const authPath = path.join('./auth_data', `session-user-${userId}`);
-                if (fs.existsSync(authPath)) {
-                    console.log(`⚠️ Auth data still exists, force deleting again...`);
-                    try {
-                        fs.rmSync(authPath, { recursive: true, force: true, maxRetries: 3 });
-                    } catch (error) {
-                        console.error(`✗ Failed to force delete: ${error.message}`);
-                    }
-                }
-            }
+      if (forceNew) {
+        console.log(`🧹 Force cleaning auth data for user ${userId}`);
+        await cleanStaleAuthData(userId);
+        await new Promise((resolve) => setTimeout(resolve, 500));
 
-            const client = new Client({
-                authStrategy: new LocalAuth({ 
-                    dataPath: './auth_data',
-                    clientId: `user-${userId}`
-                }),
-                puppeteer: {
-                    headless: true,
-                    args: [
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-accelerated-2d-canvas',
-                        '--no-first-run',
-                        '--no-zygote',
-                        '--single-process',
-                        '--disable-gpu',
-                        '--disable-web-resources'
-                    ]
-                }
+        const authPath = path.join("./auth_data", `session-user-${userId}`);
+        if (fs.existsSync(authPath)) {
+          console.log(`⚠️ Auth data still exists, force deleting again...`);
+          try {
+            fs.rmSync(authPath, {
+              recursive: true,
+              force: true,
+              maxRetries: 3,
             });
-
-            let qrGenerated = false;
-            let authenticated = false;
-
-            // QR handler - use ONCE
-            client.once('qr', async (qr) => {
-                qrGenerated = true;
-                const qrData = await qrcode.toDataURL(qr);
-                qrCodes.set(userId, qrData);
-                console.log(`📱 QR Code generated for user ${userId}`);
-            });
-
-            // Authenticated handler - use ONCE
-            client.once('authenticated', async () => {
-                authenticated = true;
-                console.log(`✓ User ${userId} authenticated`);
-                qrCodes.delete(userId);
-            });
-
-            // Configure heartbeat and event handlers
-            configureClientHeartbeat(client, userId, token);
-
-            // Message handler
-            client.on('message', async (message) => {
-                try {
-                    const contact = await message.getContact();
-                    const myInfo = client.info;
-
-                    await callPHPAPI('/stats/update', 'POST', {
-                        field: 'received',
-                        increment: 1
-                    }, token);
-
-                    const hasMedia = message.hasMedia;
-                    let mediaType = null;
-                    let mediaUrl = null;
-
-                    if (hasMedia) {
-                        try {
-                            const media = await message.downloadMedia();
-                            if (media) {
-                                mediaType = media.mimetype.split('/')[0];
-                                const extension = media.mimetype.split('/')[1] || 'bin';
-                                const filename = `${Date.now()}_${message.id.id}.${extension}`;
-                                const filepath = path.join('uploads', filename);
-                                fs.writeFileSync(filepath, media.data, 'base64');
-                                mediaUrl = `/uploads/${filename}`;
-                            }
-                        } catch (mediaError) {
-                            console.error('✗ Error downloading media:', mediaError);
-                        }
-                    }
-
-                    await callPHPAPI('/messages/save', 'POST', {
-                        message_id: message.id.id,
-                        type: 'received',
-                        from_number: contact.number,
-                        from_name: contact.name || contact.pushname || contact.number,
-                        to_number: myInfo.wid.user,
-                        to_name: myInfo.pushname,
-                        message_body: message.body || null,
-                        has_media: hasMedia,
-                        media_type: mediaType,
-                        media_url: mediaUrl,
-                        status: 'received',
-                        timestamp: message.timestamp
-                    }, token);
-
-                    console.log(`✓ Message saved for user ${userId}`);
-                } catch (error) {
-                    console.error('✗ Error saving received message:', error);
-                }
-            });
-
-            console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
-            await client.initialize();
-            
-            let waitTime = 0;
-            // while (waitTime < 15000 && !qrGenerated && !authenticated) {
-            //     await new Promise(resolve => setTimeout(resolve, 500));
-            //     waitTime += 500;
-            // }
-            
-            try {
-                const state = await client.getState();
-                console.log(`📊 Client state after initialization for user ${userId}: ${state}`);
-                
-                if (state === 'CONNECTED' && !qrGenerated && forceNew) {
-                    console.error(`❌ ERROR: Client connected without QR despite forceNew!`);
-                    console.log(`🔄 Destroying and retrying...`);
-                    
-                    await client.destroy();
-                    eventListenersAttached.delete(userId);
-                    await cleanStaleAuthData(userId);
-                    clientInitializing.delete(userId);
-                    initializationPromises.delete(userId);
-                    
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    
-                    const authPath = path.join('./auth_data', `session-user-${userId}`);
-                    if (fs.existsSync(authPath)) {
-                        const parentDir = path.join('./auth_data');
-                        const sessionDirs = fs.readdirSync(parentDir).filter(f => f.includes(`user-${userId}`));
-                        sessionDirs.forEach(dir => {
-                            const fullPath = path.join(parentDir, dir);
-                            console.log(`🧹 Removing: ${fullPath}`);
-                            fs.rmSync(fullPath, { recursive: true, force: true, maxRetries: 5 });
-                        });
-                    }
-                    
-                    return await initializeClientForUser(userId, token, forceNew);
-                }
-                
-            } catch (error) {
-                console.log(`✗ Error checking state: ${error.message}`);
-            }
-            
-            clients.set(userId, client);
-            clientInitializing.delete(userId);
-            console.log(`✓ Client successfully initialized for user ${userId}`);
-            
-            return client;
-        } catch (error) {
-            console.error(`✗ Error initializing client for user ${userId}:`, error);
-            clientInitializing.delete(userId);
-            initializationPromises.delete(userId);
-            eventListenersAttached.delete(userId);
-            await cleanStaleAuthData(userId);
-            throw error;
+          } catch (error) {
+            console.error(`✗ Failed to force delete: ${error.message}`);
+          }
         }
-    })();
+      }
 
-    // Store the promise
-    initializationPromises.set(userId, initPromise);
+      const client = new Client({
+        authStrategy: new LocalAuth({
+          dataPath: "./auth_data",
+          clientId: `user-${userId}`,
+        }),
+        puppeteer: {
+          headless: "new",
+          executablePath:
+            getChromePath() ||
+            process.env.CHROME_PATH ||
+            "/usr/bin/google-chrome-stable",
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+            "--disable-web-resources",
+            "--remote-debugging-port=9222",
+            "--remote-debugging-address=0.0.0.0",
+          ],
+          timeout: 60000,
+          // Prevent Puppeteer from trying to download Chrome
+          channel: "chrome",
+        },
+      });
 
-    // Remove promise when done (success or failure)
-    initPromise.finally(() => {
-        initializationPromises.delete(userId);
-    });
+      let qrGenerated = false;
+      let authenticated = false;
 
-    return await initPromise;
+      // QR handler - use ONCE
+      client.once("qr", async (qr) => {
+        qrGenerated = true;
+        const qrData = await qrcode.toDataURL(qr);
+        qrCodes.set(userId, qrData);
+        console.log(`📱 QR Code generated for user ${userId}`);
+      });
+
+      // Authenticated handler - use ONCE
+      client.once("authenticated", async () => {
+        authenticated = true;
+        console.log(`✓ User ${userId} authenticated`);
+        qrCodes.delete(userId);
+      });
+
+      // Configure heartbeat and event handlers
+      configureClientHeartbeat(client, userId, token);
+
+      // Message handler
+      client.on("message", async (message) => {
+        try {
+          const contact = await message.getContact();
+          const myInfo = client.info;
+
+          await callPHPAPI(
+            "/stats/update",
+            "POST",
+            {
+              field: "received",
+              increment: 1,
+            },
+            token,
+          );
+
+          const hasMedia = message.hasMedia;
+          let mediaType = null;
+          let mediaUrl = null;
+
+          if (hasMedia) {
+            try {
+              const media = await message.downloadMedia();
+              if (media) {
+                mediaType = media.mimetype.split("/")[0];
+                const extension = media.mimetype.split("/")[1] || "bin";
+                const filename = `${Date.now()}_${message.id.id}.${extension}`;
+                const filepath = path.join("uploads", filename);
+                fs.writeFileSync(filepath, media.data, "base64");
+                mediaUrl = `/uploads/${filename}`;
+              }
+            } catch (mediaError) {
+              console.error("✗ Error downloading media:", mediaError);
+            }
+          }
+
+          await callPHPAPI(
+            "/messages/save",
+            "POST",
+            {
+              message_id: message.id.id,
+              type: "received",
+              from_number: contact.number,
+              from_name: contact.name || contact.pushname || contact.number,
+              to_number: myInfo.wid.user,
+              to_name: myInfo.pushname,
+              message_body: message.body || null,
+              has_media: hasMedia,
+              media_type: mediaType,
+              media_url: mediaUrl,
+              status: "received",
+              timestamp: message.timestamp,
+            },
+            token,
+          );
+
+          console.log(`✓ Message saved for user ${userId}`);
+        } catch (error) {
+          console.error("✗ Error saving received message:", error);
+        }
+      });
+
+      console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
+      await client.initialize();
+
+      let waitTime = 0;
+      // while (waitTime < 15000 && !qrGenerated && !authenticated) {
+      //     await new Promise(resolve => setTimeout(resolve, 500));
+      //     waitTime += 500;
+      // }
+
+      try {
+        const state = await client.getState();
+        console.log(
+          `📊 Client state after initialization for user ${userId}: ${state}`,
+        );
+
+        if (state === "CONNECTED" && !qrGenerated && forceNew) {
+          console.error(
+            `❌ ERROR: Client connected without QR despite forceNew!`,
+          );
+          console.log(`🔄 Destroying and retrying...`);
+
+          await client.destroy();
+          eventListenersAttached.delete(userId);
+          await cleanStaleAuthData(userId);
+          clientInitializing.delete(userId);
+          initializationPromises.delete(userId);
+
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+
+          const authPath = path.join("./auth_data", `session-user-${userId}`);
+          if (fs.existsSync(authPath)) {
+            const parentDir = path.join("./auth_data");
+            const sessionDirs = fs
+              .readdirSync(parentDir)
+              .filter((f) => f.includes(`user-${userId}`));
+            sessionDirs.forEach((dir) => {
+              const fullPath = path.join(parentDir, dir);
+              console.log(`🧹 Removing: ${fullPath}`);
+              fs.rmSync(fullPath, {
+                recursive: true,
+                force: true,
+                maxRetries: 5,
+              });
+            });
+          }
+
+          return await initializeClientForUser(userId, token, forceNew);
+        }
+      } catch (error) {
+        console.log(`✗ Error checking state: ${error.message}`);
+      }
+
+      clients.set(userId, client);
+      clientInitializing.delete(userId);
+      console.log(`✓ Client successfully initialized for user ${userId}`);
+
+      return client;
+    } catch (error) {
+      console.error(`✗ Error initializing client for user ${userId}:`, error);
+      clientInitializing.delete(userId);
+      initializationPromises.delete(userId);
+      eventListenersAttached.delete(userId);
+      await cleanStaleAuthData(userId);
+      throw error;
+    }
+  })();
+
+  // Store the promise
+  initializationPromises.set(userId, initPromise);
+
+  // Remove promise when done (success or failure)
+  initPromise.finally(() => {
+    initializationPromises.delete(userId);
+  });
+
+  return await initPromise;
 }
 // WhatsApp Routes
 app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
