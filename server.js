@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 5000;
 // const PHP_API_URL =
 //   process.env.PHP_API_URL || "http://localhost/whatsapp-api/api.php";
 // const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
-const PHP_API_URL = process.env.PHP_API_URL ||"https://sendwatsapp.in/whatsapp-api/api.php";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://sendwatsapp.in";
+const PHP_API_URL = process.env.PHP_API_URL || 'https://imw-edu.com/whatsapp-api/api.php'||"https://sendwatsapp.in/whatsapp-api/api.php";
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://imw-edu.com'||"https://sendwatsapp.in";
 const NODE_ENV = process.env.NODE_ENV || "development";
 
 // Debug configuration
