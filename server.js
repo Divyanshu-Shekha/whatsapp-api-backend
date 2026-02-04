@@ -503,15 +503,15 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       debugLog(`Creating new WhatsApp client for user ${userId}`);
 
-   const client = new Client({
+const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: "./auth_data",
     clientId: `user-${userId}`,
   }),
   puppeteer: {
     headless: "new",
-    // Use this simpler approach for Render
-    executablePath: '/usr/bin/google-chrome-stable', // Direct path for Render
+    // Try Chromium first since Chrome might not be available
+    executablePath: '/usr/bin/chromium-browser',
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -522,10 +522,31 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       "--single-process",
       "--disable-gpu",
       "--disable-web-resources",
-      "--remote-debugging-port=9222",
-      "--remote-debugging-address=0.0.0.0",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-default-apps",
+      "--disable-sync",
+      "--disable-translate",
+      "--hide-scrollbars",
+      "--metrics-recording-only",
+      "--mute-audio",
+      "--no-default-browser-check",
+      "--disable-component-update",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-breakpad",
+      "--disable-client-side-phishing-detection",
+      "--disable-crash-reporter",
+      "--disable-hang-monitor",
+      "--disable-ipc-flooding-protection",
+      "--disable-popup-blocking",
+      "--disable-prompt-on-repost",
+      "--disable-renderer-backgrounding",
+      "--disable-sync",
+      "--force-color-profile=srgb",
+      "--use-mock-keychain",
     ],
-    timeout: 60000,
+    timeout: 120000, // Increase timeout
   },
 });
 
@@ -1529,15 +1550,15 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         }
       }
 
-    const client = new Client({
+ const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: "./auth_data",
     clientId: `user-${userId}`,
   }),
   puppeteer: {
     headless: "new",
-    // Use this simpler approach for Render
-    executablePath: '/usr/bin/google-chrome-stable', // Direct path for Render
+    // Try Chromium first since Chrome might not be available
+    executablePath: '/usr/bin/chromium-browser',
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -1548,10 +1569,31 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       "--single-process",
       "--disable-gpu",
       "--disable-web-resources",
-      "--remote-debugging-port=9222",
-      "--remote-debugging-address=0.0.0.0",
+      "--disable-extensions",
+      "--disable-background-networking",
+      "--disable-default-apps",
+      "--disable-sync",
+      "--disable-translate",
+      "--hide-scrollbars",
+      "--metrics-recording-only",
+      "--mute-audio",
+      "--no-default-browser-check",
+      "--disable-component-update",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-breakpad",
+      "--disable-client-side-phishing-detection",
+      "--disable-crash-reporter",
+      "--disable-hang-monitor",
+      "--disable-ipc-flooding-protection",
+      "--disable-popup-blocking",
+      "--disable-prompt-on-repost",
+      "--disable-renderer-backgrounding",
+      "--disable-sync",
+      "--force-color-profile=srgb",
+      "--use-mock-keychain",
     ],
-    timeout: 60000,
+    timeout: 120000, // Increase timeout
   },
 });
 
