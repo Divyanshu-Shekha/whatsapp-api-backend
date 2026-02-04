@@ -503,7 +503,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
           executablePath:
             getChromePath() ||
             process.env.CHROME_PATH ||
-            "/usr/bin/google-chrome-stable",
+            '/usr/bin/chromium',
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -1533,7 +1533,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
           executablePath:
             getChromePath() ||
             process.env.CHROME_PATH ||
-            "/usr/bin/google-chrome-stable",
+            '/usr/bin/chromium',
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
