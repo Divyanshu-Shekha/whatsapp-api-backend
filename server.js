@@ -503,52 +503,23 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       debugLog(`Creating new WhatsApp client for user ${userId}`);
 
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: "./auth_data",
-          clientId: `user-${userId}`,
-        }),
-        puppeteer: {
-          headless: "new",
-          // Try Chromium first since Chrome might not be available
-          executablePath: undefined,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-web-resources",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-default-apps",
-            "--disable-sync",
-            "--disable-translate",
-            "--hide-scrollbars",
-            "--metrics-recording-only",
-            "--mute-audio",
-            "--no-default-browser-check",
-            "--disable-component-update",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-breakpad",
-            "--disable-client-side-phishing-detection",
-            "--disable-crash-reporter",
-            "--disable-hang-monitor",
-            "--disable-ipc-flooding-protection",
-            "--disable-popup-blocking",
-            "--disable-prompt-on-repost",
-            "--disable-renderer-backgrounding",
-            "--disable-sync",
-            "--force-color-profile=srgb",
-            "--use-mock-keychain",
-          ],
-          timeout: 120000, // Increase timeout
-        },
-      });
+     const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        executablePath: '/usr/bin/google-chrome-stable', // Use system Chrome
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
+    }
+});
 
       // QR Code handler
       client.once("qr", async (qr) => {
@@ -1550,52 +1521,23 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         }
       }
 
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: "./auth_data",
-          clientId: `user-${userId}`,
-        }),
-        puppeteer: {
-          headless: "new",
-          // Try Chromium first since Chrome might not be available
-          executablePath: undefined,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-web-resources",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-default-apps",
-            "--disable-sync",
-            "--disable-translate",
-            "--hide-scrollbars",
-            "--metrics-recording-only",
-            "--mute-audio",
-            "--no-default-browser-check",
-            "--disable-component-update",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-breakpad",
-            "--disable-client-side-phishing-detection",
-            "--disable-crash-reporter",
-            "--disable-hang-monitor",
-            "--disable-ipc-flooding-protection",
-            "--disable-popup-blocking",
-            "--disable-prompt-on-repost",
-            "--disable-renderer-backgrounding",
-            "--disable-sync",
-            "--force-color-profile=srgb",
-            "--use-mock-keychain",
-          ],
-          timeout: 120000, // Increase timeout
-        },
-      });
+   const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        executablePath: '/usr/bin/google-chrome-stable', // Use system Chrome
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
+    }
+});
 
       let qrGenerated = false;
       let authenticated = false;
