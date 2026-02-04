@@ -1490,26 +1490,31 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         }
       }
 
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: "./auth_data",
-          clientId: `user-${userId}`,
-        }),
-        puppeteer: {
-          headless: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-web-resources",
-          ],
-        },
-      });
+    // Replace the puppeteer configuration in your Client initialization
+const client = new Client({
+  authStrategy: new LocalAuth({
+    dataPath: "./auth_data",
+    clientId: `user-${userId}`
+  }),
+  puppeteer: {
+    headless: "new",
+    executablePath: process.env.CHROME_PATH || "/usr/bin/chromium",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-gpu",
+      "--disable-web-resources",
+      "--remote-debugging-port=9222",
+      "--remote-debugging-address=0.0.0.0"
+    ],
+    timeout: 0
+  }
+});
 
       let qrGenerated = false;
       let authenticated = false;
