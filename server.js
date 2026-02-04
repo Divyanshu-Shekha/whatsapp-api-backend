@@ -11,17 +11,17 @@ function getChromePath() {
   // Check common Chrome paths - UPDATED FOR RENDER
   const possiblePaths = [
     // Render-specific paths FIRST
-    '/opt/render/project/.apt/usr/bin/google-chrome', // Render default Chrome location
-    '/usr/bin/google-chrome-stable',                   // Common Linux (installed by build script)
-    '/usr/bin/google-chrome',                          // Alternative
-    '/usr/bin/chromium-browser',                       // Chromium alternative
-    '/usr/bin/chromium',                               // Last resort
-    process.env.CHROME_PATH,                           // Environment variable
-    process.env.PUPPETEER_EXECUTABLE_PATH,             // Puppeteer environment variable
+    "/opt/render/project/.apt/usr/bin/google-chrome", // Render default Chrome location
+    "/usr/bin/google-chrome-stable", // Common Linux (installed by build script)
+    "/usr/bin/google-chrome", // Alternative
+    "/usr/bin/chromium-browser", // Chromium alternative
+    "/usr/bin/chromium", // Last resort
+    process.env.CHROME_PATH, // Environment variable
+    process.env.PUPPETEER_EXECUTABLE_PATH, // Puppeteer environment variable
   ];
 
-  console.log('🔍 Looking for Chrome in possible paths...');
-  
+  console.log("🔍 Looking for Chrome in possible paths...");
+
   for (const chromePath of possiblePaths) {
     if (chromePath) {
       console.log(`   Checking: ${chromePath}`);
@@ -36,7 +36,7 @@ function getChromePath() {
     }
   }
 
-  console.log('❌ Chrome not found in standard paths');
+  console.log("❌ Chrome not found in standard paths");
   return null;
 }
 
@@ -503,52 +503,52 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       debugLog(`Creating new WhatsApp client for user ${userId}`);
 
-const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: "./auth_data",
-    clientId: `user-${userId}`,
-  }),
-  puppeteer: {
-    headless: "new",
-    // Try Chromium first since Chrome might not be available
-    executablePath: '/usr/bin/chromium-browser',
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process",
-      "--disable-gpu",
-      "--disable-web-resources",
-      "--disable-extensions",
-      "--disable-background-networking",
-      "--disable-default-apps",
-      "--disable-sync",
-      "--disable-translate",
-      "--hide-scrollbars",
-      "--metrics-recording-only",
-      "--mute-audio",
-      "--no-default-browser-check",
-      "--disable-component-update",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-breakpad",
-      "--disable-client-side-phishing-detection",
-      "--disable-crash-reporter",
-      "--disable-hang-monitor",
-      "--disable-ipc-flooding-protection",
-      "--disable-popup-blocking",
-      "--disable-prompt-on-repost",
-      "--disable-renderer-backgrounding",
-      "--disable-sync",
-      "--force-color-profile=srgb",
-      "--use-mock-keychain",
-    ],
-    timeout: 120000, // Increase timeout
-  },
-});
+      const client = new Client({
+        authStrategy: new LocalAuth({
+          dataPath: "./auth_data",
+          clientId: `user-${userId}`,
+        }),
+        puppeteer: {
+          headless: "new",
+          // Try Chromium first since Chrome might not be available
+          executablePath: undefined,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+            "--disable-web-resources",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--no-default-browser-check",
+            "--disable-component-update",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-breakpad",
+            "--disable-client-side-phishing-detection",
+            "--disable-crash-reporter",
+            "--disable-hang-monitor",
+            "--disable-ipc-flooding-protection",
+            "--disable-popup-blocking",
+            "--disable-prompt-on-repost",
+            "--disable-renderer-backgrounding",
+            "--disable-sync",
+            "--force-color-profile=srgb",
+            "--use-mock-keychain",
+          ],
+          timeout: 120000, // Increase timeout
+        },
+      });
 
       // QR Code handler
       client.once("qr", async (qr) => {
@@ -1550,52 +1550,52 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         }
       }
 
- const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: "./auth_data",
-    clientId: `user-${userId}`,
-  }),
-  puppeteer: {
-    headless: "new",
-    // Try Chromium first since Chrome might not be available
-    executablePath: '/usr/bin/chromium-browser',
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process",
-      "--disable-gpu",
-      "--disable-web-resources",
-      "--disable-extensions",
-      "--disable-background-networking",
-      "--disable-default-apps",
-      "--disable-sync",
-      "--disable-translate",
-      "--hide-scrollbars",
-      "--metrics-recording-only",
-      "--mute-audio",
-      "--no-default-browser-check",
-      "--disable-component-update",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-breakpad",
-      "--disable-client-side-phishing-detection",
-      "--disable-crash-reporter",
-      "--disable-hang-monitor",
-      "--disable-ipc-flooding-protection",
-      "--disable-popup-blocking",
-      "--disable-prompt-on-repost",
-      "--disable-renderer-backgrounding",
-      "--disable-sync",
-      "--force-color-profile=srgb",
-      "--use-mock-keychain",
-    ],
-    timeout: 120000, // Increase timeout
-  },
-});
+      const client = new Client({
+        authStrategy: new LocalAuth({
+          dataPath: "./auth_data",
+          clientId: `user-${userId}`,
+        }),
+        puppeteer: {
+          headless: "new",
+          // Try Chromium first since Chrome might not be available
+          executablePath: undefined,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+            "--disable-web-resources",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--no-default-browser-check",
+            "--disable-component-update",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-breakpad",
+            "--disable-client-side-phishing-detection",
+            "--disable-crash-reporter",
+            "--disable-hang-monitor",
+            "--disable-ipc-flooding-protection",
+            "--disable-popup-blocking",
+            "--disable-prompt-on-repost",
+            "--disable-renderer-backgrounding",
+            "--disable-sync",
+            "--force-color-profile=srgb",
+            "--use-mock-keychain",
+          ],
+          timeout: 120000, // Increase timeout
+        },
+      });
 
       let qrGenerated = false;
       let authenticated = false;
