@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "WhatsApp API with MySQL Authentication",
   "main": "server.js",
-  "scripts": {
+   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js",
-    "build": "apt-get update && apt-get install -y wget unzip chromium chromium-sandbox && npm install",
+    "dev": "nodemon server.js",
+    "build": "apt-get update && apt-get install -y wget gnupg && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' >> /etc/apt/sources.list.d/google-chrome.list && apt-get update && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 --no-install-recommends && npm install",
     "postinstall": "echo 'Chrome installation completed'"
   },
   "dependencies": {

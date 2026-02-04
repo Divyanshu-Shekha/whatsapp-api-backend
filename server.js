@@ -8,25 +8,35 @@ const fs = require("fs");
 const axios = require("axios");
 
 function getChromePath() {
-  // Check common Chrome paths
+  // Check common Chrome paths - UPDATED FOR RENDER
   const possiblePaths = [
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-    "/usr/local/bin/chrome",
-    process.env.CHROME_PATH,
-    process.env.PUPPETEER_EXECUTABLE_PATH,
+    // Render-specific paths FIRST
+    '/opt/render/project/.apt/usr/bin/google-chrome', // Render default Chrome location
+    '/usr/bin/google-chrome-stable',                   // Common Linux (installed by build script)
+    '/usr/bin/google-chrome',                          // Alternative
+    '/usr/bin/chromium-browser',                       // Chromium alternative
+    '/usr/bin/chromium',                               // Last resort
+    process.env.CHROME_PATH,                           // Environment variable
+    process.env.PUPPETEER_EXECUTABLE_PATH,             // Puppeteer environment variable
   ];
 
-  for (const path of possiblePaths) {
-    if (path && fs.existsSync(path)) {
-      debugLog(`Found Chrome at: ${path}`);
-      return path;
+  console.log('🔍 Looking for Chrome in possible paths...');
+  
+  for (const chromePath of possiblePaths) {
+    if (chromePath) {
+      console.log(`   Checking: ${chromePath}`);
+      try {
+        if (fs.existsSync(chromePath)) {
+          console.log(`✅ Found Chrome at: ${chromePath}`);
+          return chromePath;
+        }
+      } catch (err) {
+        console.log(`   Could not access: ${chromePath}`);
+      }
     }
   }
 
-  debugLog("Chrome not found in standard paths");
+  console.log('❌ Chrome not found in standard paths');
   return null;
 }
 
@@ -493,33 +503,31 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       debugLog(`Creating new WhatsApp client for user ${userId}`);
 
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: "./auth_data",
-          clientId: `user-${userId}`,
-        }),
-        puppeteer: {
-          headless: "new",
-          executablePath:
-            getChromePath() || process.env.CHROME_PATH || "/usr/bin/chromium",
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-web-resources",
-            "--remote-debugging-port=9222",
-            "--remote-debugging-address=0.0.0.0",
-          ],
-          timeout: 60000,
-          // Prevent Puppeteer from trying to download Chrome
-          channel: "chrome",
-        },
-      });
+   const client = new Client({
+  authStrategy: new LocalAuth({
+    dataPath: "./auth_data",
+    clientId: `user-${userId}`,
+  }),
+  puppeteer: {
+    headless: "new",
+    // Use this simpler approach for Render
+    executablePath: '/usr/bin/google-chrome-stable', // Direct path for Render
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-gpu",
+      "--disable-web-resources",
+      "--remote-debugging-port=9222",
+      "--remote-debugging-address=0.0.0.0",
+    ],
+    timeout: 60000,
+  },
+});
 
       // QR Code handler
       client.once("qr", async (qr) => {
@@ -1521,33 +1529,31 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         }
       }
 
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: "./auth_data",
-          clientId: `user-${userId}`,
-        }),
-        puppeteer: {
-          headless: "new",
-          executablePath:
-            getChromePath() || process.env.CHROME_PATH || "/usr/bin/chromium",
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--no-first-run",
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-web-resources",
-            "--remote-debugging-port=9222",
-            "--remote-debugging-address=0.0.0.0",
-          ],
-          timeout: 60000,
-          // Prevent Puppeteer from trying to download Chrome
-          channel: "chrome",
-        },
-      });
+    const client = new Client({
+  authStrategy: new LocalAuth({
+    dataPath: "./auth_data",
+    clientId: `user-${userId}`,
+  }),
+  puppeteer: {
+    headless: "new",
+    // Use this simpler approach for Render
+    executablePath: '/usr/bin/google-chrome-stable', // Direct path for Render
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-gpu",
+      "--disable-web-resources",
+      "--remote-debugging-port=9222",
+      "--remote-debugging-address=0.0.0.0",
+    ],
+    timeout: 60000,
+  },
+});
 
       let qrGenerated = false;
       let authenticated = false;
