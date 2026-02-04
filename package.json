@@ -21,7 +21,8 @@
     "mysql2": "^3.6.5",
     "pino": "^10.1.0",
     "qrcode": "^1.5.4",
-    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js"
+    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js",
+    "puppeteer": "^22.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
