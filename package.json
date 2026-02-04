@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "apt-get update && apt-get install -y chromium && npm install",
+    "build": "apt-get update && apt-get install -y wget unzip chromium chromium-sandbox && npm install",
     "postinstall": "echo 'Chrome installation completed'"
   },
   "dependencies": {

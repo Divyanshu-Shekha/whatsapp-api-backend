@@ -501,9 +501,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         puppeteer: {
           headless: "new",
           executablePath:
-            getChromePath() ||
-            process.env.CHROME_PATH ||
-            '/usr/bin/chromium',
+            getChromePath() || process.env.CHROME_PATH || "/usr/bin/chromium",
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -1531,9 +1529,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         puppeteer: {
           headless: "new",
           executablePath:
-            getChromePath() ||
-            process.env.CHROME_PATH ||
-            '/usr/bin/chromium',
+            getChromePath() || process.env.CHROME_PATH || "/usr/bin/chromium",
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
