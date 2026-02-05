@@ -1904,7 +1904,6 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
           error.message.includes("Session closed") ||
           error.message.includes("Target closed")
         ) {
-          // Client is frozen/dead, remove it
           clients.delete(req.userId);
           clientState = "DISCONNECTED";
         }
@@ -1924,26 +1923,51 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       debugLog(`No session in DB for user ${req.userId}: ${error.message}`);
     }
 
-    // CRITICAL FIX: If DB says connected but client doesn't exist or isn't connected,
-    // DON'T immediately clean DB - client might be initializing
-    const actuallyConnected = isConnected && session?.is_active;
+    // FIXED LOGIC: Prioritize client state over database
+    // If client says CONNECTED, we should trust it
+    let actuallyConnected = isConnected;
+    
+    // If client is connected but DB doesn't know it yet, update DB
+    if (isConnected && (!session || session?.is_active !== 1)) {
+      debugLog(`Client connected but DB not updated. Marking as connected.`);
+      
+      // Optionally update DB in background
+      try {
+        await callPHPAPI(
+          "/whatsapp/session/update-status",
+          "POST",
+          { is_active: 1, last_connected: new Date().toISOString() },
+          req.token,
+        );
+        debugLog("Database status updated");
+      } catch (dbError) {
+        debugLog(`Failed to update DB: ${dbError.message}`);
+        // Don't fail if DB update fails
+      }
+    }
 
     debugLog(`Status response:`, {
       connected: actuallyConnected,
       clientActive: isConnected,
       clientState,
+      sessionActive: session?.is_active,
     });
 
     res.json({
-      connected: actuallyConnected,
+      connected: actuallyConnected, // Use client state as source of truth
       session: session || null,
       clientActive: isConnected,
       clientState,
       timestamp: Date.now(),
+      // Add helpful debug info for frontend
+      debug: {
+        clientConnected: isConnected,
+        dbActive: session?.is_active || 0,
+        stateMismatch: isConnected !== (session?.is_active === 1)
+      }
     });
   } catch (error) {
     debugLog("Status check error:", error.message);
-
     res.status(500).json({
       error: error.message,
       code: "STATUS_CHECK_FAILED",
