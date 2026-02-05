@@ -1888,7 +1888,7 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
         } else {
           const statePromise = client.getState();
           const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("State check timeout")), 5000),
+            setTimeout(() => reject(new Error("State check timeout")), 100000),
           );
 
           clientState = await Promise.race([statePromise, timeoutPromise]);
