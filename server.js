@@ -2749,6 +2749,95 @@ app.get("/api/subscriptions/has-active", verifyAnyToken, async (req, res) => {
   }
 });
 
+app.post('/api/send-message', verifyAnyToken, async (req, res) => {
+    try {
+        const { number, message } = req.body;
+        
+        if (!number || !message) {
+            return res.status(400).json({ error: 'Number and message are required' });
+        }
+
+        const client = clients.get(req.userId);
+
+        if (!client) {
+            return res.status(400).json({ 
+                error: 'WhatsApp not connected',
+                details: 'Please connect to WhatsApp first',
+                code: 'NOT_CONNECTED'
+            });
+        }
+
+        const state = await client.getState();
+        if (state !== 'CONNECTED') {
+            return res.status(400).json({ 
+                error: 'WhatsApp not ready',
+                state: state,
+                code: 'NOT_READY'
+            });
+        }
+
+        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
+        
+        console.log(`📤 Sending message to ${chatId} (User: ${req.userId})`);
+        const sentMessage = await client.sendMessage(chatId, message);
+        console.log(`✓ Message sent successfully: ${sentMessage.id.id}`);
+
+        let contactName = number;
+        try {
+            const contact = await client.getContactById(chatId);
+            contactName = contact.name || contact.pushname || number;
+        } catch (err) {
+            console.log('Could not get contact name:', err.message);
+        }
+
+        const myInfo = client.info;
+
+        const authToken = req.token;
+        const savedMessage = await callPHPAPI('/messages/save', 'POST', {
+            message_id: sentMessage.id.id,
+            type: 'sent',
+            from_number: myInfo.wid.user,
+            from_name: myInfo.pushname,
+            to_number: number,
+            to_name: contactName,
+            message_body: message,
+            has_media: false,
+            status: 'sent',
+            timestamp: sentMessage.timestamp
+        }, authToken);
+
+        await callPHPAPI('/stats/update', 'POST', {
+            field: 'sent',
+            increment: 1
+        }, authToken);
+
+        res.json({ 
+            success: true, 
+            message: 'Message sent successfully',
+            messageId: sentMessage.id.id,
+            dbId: savedMessage?.id || null
+        });
+    } catch (error) {
+        console.error('✗ Error sending message:', error.message);
+        
+        try {
+            const authToken = req.token;
+            await callPHPAPI('/stats/update', 'POST', {
+                field: 'failed',
+                increment: 1
+            }, authToken);
+        } catch (e) {
+            console.error('Failed to update stats:', e.message);
+        }
+        
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Failed to send message',
+            code: 'SEND_MESSAGE_ERROR'
+        });
+    }
+});
+
 app.post(
   "/api/send-media",
   verifyAnyToken,
