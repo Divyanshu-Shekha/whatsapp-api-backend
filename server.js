@@ -1533,49 +1533,54 @@ function getRandomConnectedDevice(userId, devices) {
 }
 
 // Initialize WhatsApp Client
-async function initializeClientForUser(userId, token, forceNew = false) {
-  // Check if initialization is already in progress
-  if (initializationPromises.has(userId)) {
-    console.log(
-      `⏳ Client initialization already in progress for user ${userId}, reusing promise...`,
-    );
-    return await initializationPromises.get(userId);
+// Add this function (NEW)
+async function initializeClientForDevice(userId, deviceId, phoneNumber, token, forceNew = false) {
+  const clientKey = `${userId}-${deviceId}`;
+
+  if (initializationPromises.has(clientKey)) {
+    debugLog(`Device initialization already in progress for ${clientKey}, reusing promise...`);
+    return await initializationPromises.get(clientKey);
   }
 
-  // Create initialization promise
   const initPromise = (async () => {
     try {
-      clientInitializing.set(userId, true);
-      console.log(
-        `🔄 Starting client initialization for user ${userId} (forceNew: ${forceNew})`,
-      );
+      clientInitializing.set(clientKey, true);
+      debugLog(`Starting client initialization for device ${deviceId} (user ${userId})`);
 
-      if (forceNew) {
-        console.log(`🧹 Force cleaning auth data for user ${userId}`);
-        await cleanStaleAuthData(userId);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-        const authPath = path.join("./auth_data", `session-user-${userId}`);
-        if (fs.existsSync(authPath)) {
-          console.log(`⚠️ Auth data still exists, force deleting again...`);
-          try {
-            fs.rmSync(authPath, {
-              recursive: true,
-              force: true,
-              maxRetries: 3,
-            });
-          } catch (error) {
-            console.error(`✗ Failed to force delete: ${error.message}`);
-          }
+      // Clean existing client if exists
+      if (clients.has(clientKey)) {
+        const oldClient = clients.get(clientKey);
+        debugLog(`Destroying existing client for device ${deviceId}`);
+        try {
+          await oldClient.destroy();
+        } catch (error) {
+          debugLog(`Error destroying old client: ${error.message}`);
         }
+        clients.delete(clientKey);
+        eventListenersAttached.delete(clientKey);
       }
 
-   const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        executablePath: chromePath, // Use system Chrome
-        args: [
+      // Clean QR code and state
+      qrCodes.delete(clientKey);
+      clientInitializing.delete(clientKey);
+
+      // Clean auth data if forceNew
+      if (forceNew) {
+        debugLog(`Force cleaning auth data for device ${deviceId}`);
+        await cleanStaleAuthData(clientKey);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+
+      debugLog(`Creating new WhatsApp client for device ${deviceId}`);
+
+      const client = new Client({
+        authStrategy: new LocalAuth({
+          clientId: `device-${deviceId}`, // Unique ID for device
+        }),
+        puppeteer: {
+          headless: true,
+          executablePath: chromePath,
+          args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
@@ -1584,32 +1589,55 @@ async function initializeClientForUser(userId, token, forceNew = false) {
             '--no-zygote',
             '--single-process',
             '--disable-gpu'
-        ]
-    }
-});
+          ]
+        }
+      });
 
-      let qrGenerated = false;
-      let authenticated = false;
-
-      // QR handler - use ONCE
+      // QR Code handler
       client.once("qr", async (qr) => {
-        qrGenerated = true;
-        const qrData = await qrcode.toDataURL(qr);
-        qrCodes.set(userId, qrData);
-        console.log(`📱 QR Code generated for user ${userId}`);
+        debugLog(`QR Code received for device ${deviceId}`);
+        try {
+          const qrData = await qrcode.toDataURL(qr);
+          qrCodes.set(clientKey, qrData);
+          debugLog(`QR Code generated and stored for device ${deviceId}`);
+        } catch (qrError) {
+          debugLog(`Error generating QR code: ${qrError.message}`);
+        }
       });
 
-      // Authenticated handler - use ONCE
+      // Authentication handler
       client.once("authenticated", async () => {
-        authenticated = true;
-        console.log(`✓ User ${userId} authenticated`);
-        qrCodes.delete(userId);
+        debugLog(`Device ${deviceId} authenticated successfully`);
+        qrCodes.delete(clientKey);
       });
 
-      // Configure heartbeat and event handlers
-      configureClientHeartbeat(client, userId, token);
+      // Ready handler
+      client.once("ready", async () => {
+        debugLog(`WhatsApp client ready for device ${deviceId}`);
+        try {
+          const info = client.info;
+          debugLog(`Device client info: ${info.pushname} (${info.wid.user})`);
 
-      // Message handler
+          // Update device in database
+          await callPHPAPI(
+            `/devices/${deviceId}/update`,
+            "POST",
+            {
+              phone_number: info.wid.user,
+              pushname: info.pushname,
+              is_active: 1,
+              last_active: new Date().toISOString()
+            },
+            token
+          );
+
+          debugLog(`✅ Database updated for device ${deviceId}`);
+        } catch (error) {
+          debugLog(`Error in ready handler for device ${deviceId}: ${error.message}`);
+        }
+      });
+
+      // Message handler for device
       client.on("message", async (message) => {
         try {
           const contact = await message.getContact();
@@ -1641,7 +1669,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
                 mediaUrl = `/uploads/${filename}`;
               }
             } catch (mediaError) {
-              console.error("✗ Error downloading media:", mediaError);
+              debugLog("Error downloading media:", mediaError);
             }
           }
 
@@ -1661,89 +1689,42 @@ async function initializeClientForUser(userId, token, forceNew = false) {
               media_url: mediaUrl,
               status: "received",
               timestamp: message.timestamp,
+              device_id: deviceId
             },
             token,
           );
 
-          console.log(`✓ Message saved for user ${userId}`);
+          debugLog(`✓ Message saved for device ${deviceId}`);
         } catch (error) {
-          console.error("✗ Error saving received message:", error);
+          debugLog(`✗ Error saving received message for device ${deviceId}:`, error);
         }
       });
 
-      console.log(`🚀 Initializing WhatsApp client for user ${userId}...`);
+      debugLog(`🚀 Initializing WhatsApp client for device ${deviceId}...`);
       await client.initialize();
 
-      let waitTime = 0;
-      // while (waitTime < 15000 && !qrGenerated && !authenticated) {
-      //     await new Promise(resolve => setTimeout(resolve, 500));
-      //     waitTime += 500;
-      // }
+      clients.set(clientKey, client);
+      clientInitializing.delete(clientKey);
 
-      try {
-        const state = await client.getState();
-        console.log(
-          `📊 Client state after initialization for user ${userId}: ${state}`,
-        );
-
-        if (state === "CONNECTED" && !qrGenerated && forceNew) {
-          console.error(
-            `❌ ERROR: Client connected without QR despite forceNew!`,
-          );
-          console.log(`🔄 Destroying and retrying...`);
-
-          await client.destroy();
-          eventListenersAttached.delete(userId);
-          await cleanStaleAuthData(userId);
-          clientInitializing.delete(userId);
-          initializationPromises.delete(userId);
-
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-
-          const authPath = path.join("./auth_data", `session-user-${userId}`);
-          if (fs.existsSync(authPath)) {
-            const parentDir = path.join("./auth_data");
-            const sessionDirs = fs
-              .readdirSync(parentDir)
-              .filter((f) => f.includes(`user-${userId}`));
-            sessionDirs.forEach((dir) => {
-              const fullPath = path.join(parentDir, dir);
-              console.log(`🧹 Removing: ${fullPath}`);
-              fs.rmSync(fullPath, {
-                recursive: true,
-                force: true,
-                maxRetries: 5,
-              });
-            });
-          }
-
-          return await initializeClientForUser(userId, token, forceNew);
-        }
-      } catch (error) {
-        console.log(`✗ Error checking state: ${error.message}`);
-      }
-
-      clients.set(userId, client);
-      clientInitializing.delete(userId);
-      console.log(`✓ Client successfully initialized for user ${userId}`);
+      debugLog(`✅ Client successfully initialized for device ${deviceId}`);
 
       return client;
     } catch (error) {
-      console.error(`✗ Error initializing client for user ${userId}:`, error);
-      clientInitializing.delete(userId);
-      initializationPromises.delete(userId);
-      eventListenersAttached.delete(userId);
-      await cleanStaleAuthData(userId);
+      debugLog(`✗ Error initializing client for device ${deviceId}:`, error.message);
+
+      // Clean up on error
+      clientInitializing.delete(clientKey);
+      initializationPromises.delete(clientKey);
+      eventListenersAttached.delete(clientKey);
+
       throw error;
     }
   })();
 
-  // Store the promise
-  initializationPromises.set(userId, initPromise);
+  initializationPromises.set(clientKey, initPromise);
 
-  // Remove promise when done (success or failure)
   initPromise.finally(() => {
-    initializationPromises.delete(userId);
+    initializationPromises.delete(clientKey);
   });
 
   return await initPromise;
@@ -2785,16 +2766,39 @@ app.get("/api/subscriptions/has-active", verifyAnyToken, async (req, res) => {
 
 app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
-        const { number, message } = req.body;
+        const { number, message, deviceId } = req.body;
         
         if (!number || !message) {
             return res.status(400).json({ error: 'Number and message are required' });
         }
 
-        const client = clients.get(req.userId);
+        let client;
+        let clientKey;
+        let actualDeviceId;
+
+        // FIX: Handle API tokens differently
+        if (req.authType === "api_token") {
+            // API token - find the associated device
+            const deviceData = req.apiTokenData;
+            if (deviceData && deviceData.device_id) {
+                actualDeviceId = deviceData.device_id;
+                clientKey = `${req.userId}-${actualDeviceId}`;
+                client = clients.get(clientKey);
+            } else {
+                return res.status(400).json({ 
+                    error: 'No device associated with this API token',
+                    code: 'NO_DEVICE'
+                });
+            }
+        } else {
+            // JWT token - use specified device or default
+            actualDeviceId = deviceId || 'default';
+            clientKey = `${req.userId}-${actualDeviceId}`;
+            client = clients.get(clientKey);
+        }
 
         if (!client) {
-            debugLog(`No client found for user ${req.userId}`);
+            debugLog(`No client found for ${clientKey}`);
             return res.status(400).json({ 
                 error: 'WhatsApp not connected',
                 details: 'Please connect to WhatsApp first',
@@ -2802,7 +2806,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             });
         }
 
-        // ⭐ ADD: Check client state before sending
+        // Check client state
         let state;
         try {
             state = await client.getState();
@@ -2842,12 +2846,9 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
 
         const myInfo = client.info;
 
-        const authToken = req.token;
-        
-        // ⭐ FIX: Wrap database operations in try-catch
-        let savedMessage = null;
+        // Save to database
         try {
-            savedMessage = await callPHPAPI('/messages/save', 'POST', {
+            await callPHPAPI('/messages/save', 'POST', {
                 message_id: sentMessage.id.id,
                 type: 'sent',
                 from_number: myInfo.wid.user,
@@ -2857,42 +2858,40 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
                 message_body: message,
                 has_media: false,
                 status: 'sent',
-                timestamp: sentMessage.timestamp
-            }, authToken);
+                timestamp: sentMessage.timestamp,
+                device_id: actualDeviceId
+            }, req.token);
             
-            debugLog('Message saved to database:', savedMessage);
+            debugLog('Message saved to database');
         } catch (dbError) {
             debugLog('❌ Database save failed:', dbError.message);
-            // Don't fail the request - message was sent successfully
         }
 
+        // Update stats
         try {
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'sent',
                 increment: 1
-            }, authToken);
+            }, req.token);
         } catch (statsError) {
             debugLog('❌ Stats update failed:', statsError.message);
-            // Don't fail the request
         }
 
         res.json({ 
             success: true, 
             message: 'Message sent successfully',
             messageId: sentMessage.id.id,
-            dbId: savedMessage?.id || null,
-            warning: savedMessage ? null : 'Message sent but not saved to database'
+            deviceId: actualDeviceId
         });
     } catch (error) {
         debugLog('✗ Error sending message:', error.message);
         debugLog('Full error:', error);
         
         try {
-            const authToken = req.token;
             await callPHPAPI('/stats/update', 'POST', {
                 field: 'failed',
                 increment: 1
-            }, authToken);
+            }, req.token);
         } catch (e) {
             debugLog('Failed to update stats:', e.message);
         }
