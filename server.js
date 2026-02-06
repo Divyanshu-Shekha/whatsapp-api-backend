@@ -1901,7 +1901,6 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
 
     if (client) {
       try {
-        // Check if browser is still alive first
         if (!client.pupBrowser?.isConnected?.()) {
           debugLog(`Browser disconnected for user ${req.userId}`);
           clientState = "BROWSER_DISCONNECTED";
@@ -1913,7 +1912,9 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
 
           clientState = await Promise.race([statePromise, timeoutPromise]);
           isConnected = clientState === "CONNECTED";
-          debugLog(`Status check - Client state for user ${req.userId}: ${clientState}`);
+          debugLog(
+            `Status check - Client state for user ${req.userId}: ${clientState}`,
+          );
         }
       } catch (error) {
         debugLog(`Error checking client state: ${error.message}`);
@@ -1928,7 +1929,6 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       }
     }
 
-    // Fetch session from database
     let session = null;
     try {
       debugLog("Fetching session from database...");
@@ -1942,9 +1942,9 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       debugLog(`No session in DB for user ${req.userId}: ${error.message}`);
     }
 
-    // ⭐ KEY FIX: If client is connected but DB doesn't reflect it, update DB
+    // ⭐ If client connected but DB doesn't reflect it, update DB
     if (isConnected && (!session || session?.is_active !== 1)) {
-      debugLog(`🔧 FIX: Client connected but DB shows inactive. Updating database...`);
+      debugLog(`Client connected but DB shows inactive. Updating database...`);
       
       try {
         const info = client.info;
@@ -1954,13 +1954,13 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
           {
             phone_number: info.wid.user,
             pushname: info.pushname,
-            is_active: true,
+            is_active: 1,
           },
           req.token,
         );
-        debugLog("✅ Database status updated successfully");
+        debugLog("Database status updated");
         
-        // Fetch updated session
+        // Re-fetch session
         session = await callPHPAPI(
           "/whatsapp/session/get",
           "GET",
@@ -1968,11 +1968,10 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
           req.token,
         );
       } catch (dbError) {
-        debugLog(`❌ Failed to update DB: ${dbError.message}`);
+        debugLog(`Failed to update DB: ${dbError.message}`);
       }
     }
 
-    // Fetch stats
     let stats = null;
     try {
       stats = await callPHPAPI("/stats/get", "GET", null, req.token);
@@ -1988,7 +1987,7 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
     });
 
     res.json({
-      connected: isConnected, // Use actual client state as source of truth
+      connected: isConnected,
       session: session || null,
       clientActive: isConnected,
       clientState,
@@ -2795,6 +2794,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
         const client = clients.get(req.userId);
 
         if (!client) {
+            debugLog(`No client found for user ${req.userId}`);
             return res.status(400).json({ 
                 error: 'WhatsApp not connected',
                 details: 'Please connect to WhatsApp first',
@@ -2802,58 +2802,90 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
             });
         }
 
-        const state = await client.getState();
+        // ⭐ ADD: Check client state before sending
+        let state;
+        try {
+            state = await client.getState();
+            debugLog(`Client state before sending: ${state}`);
+        } catch (stateError) {
+            debugLog(`Error checking state: ${stateError.message}`);
+            return res.status(400).json({ 
+                error: 'WhatsApp client error',
+                details: 'Client is not responding',
+                code: 'CLIENT_ERROR'
+            });
+        }
+
         if (state !== 'CONNECTED') {
+            debugLog(`Client not ready, state: ${state}`);
             return res.status(400).json({ 
                 error: 'WhatsApp not ready',
                 state: state,
-                code: 'NOT_READY'
+                code: 'NOT_READY',
+                details: 'Please wait for WhatsApp to connect'
             });
         }
 
         const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
         
-        console.log(`📤 Sending message to ${chatId} (User: ${req.userId})`);
+        debugLog(`📤 Sending message to ${chatId} (User: ${req.userId})`);
         const sentMessage = await client.sendMessage(chatId, message);
-        console.log(`✓ Message sent successfully: ${sentMessage.id.id}`);
+        debugLog(`✓ Message sent successfully: ${sentMessage.id.id}`);
 
         let contactName = number;
         try {
             const contact = await client.getContactById(chatId);
             contactName = contact.name || contact.pushname || number;
         } catch (err) {
-            console.log('Could not get contact name:', err.message);
+            debugLog('Could not get contact name:', err.message);
         }
 
         const myInfo = client.info;
 
         const authToken = req.token;
-        const savedMessage = await callPHPAPI('/messages/save', 'POST', {
-            message_id: sentMessage.id.id,
-            type: 'sent',
-            from_number: myInfo.wid.user,
-            from_name: myInfo.pushname,
-            to_number: number,
-            to_name: contactName,
-            message_body: message,
-            has_media: false,
-            status: 'sent',
-            timestamp: sentMessage.timestamp
-        }, authToken);
+        
+        // ⭐ FIX: Wrap database operations in try-catch
+        let savedMessage = null;
+        try {
+            savedMessage = await callPHPAPI('/messages/save', 'POST', {
+                message_id: sentMessage.id.id,
+                type: 'sent',
+                from_number: myInfo.wid.user,
+                from_name: myInfo.pushname,
+                to_number: number,
+                to_name: contactName,
+                message_body: message,
+                has_media: false,
+                status: 'sent',
+                timestamp: sentMessage.timestamp
+            }, authToken);
+            
+            debugLog('Message saved to database:', savedMessage);
+        } catch (dbError) {
+            debugLog('❌ Database save failed:', dbError.message);
+            // Don't fail the request - message was sent successfully
+        }
 
-        await callPHPAPI('/stats/update', 'POST', {
-            field: 'sent',
-            increment: 1
-        }, authToken);
+        try {
+            await callPHPAPI('/stats/update', 'POST', {
+                field: 'sent',
+                increment: 1
+            }, authToken);
+        } catch (statsError) {
+            debugLog('❌ Stats update failed:', statsError.message);
+            // Don't fail the request
+        }
 
         res.json({ 
             success: true, 
             message: 'Message sent successfully',
             messageId: sentMessage.id.id,
-            dbId: savedMessage?.id || null
+            dbId: savedMessage?.id || null,
+            warning: savedMessage ? null : 'Message sent but not saved to database'
         });
     } catch (error) {
-        console.error('✗ Error sending message:', error.message);
+        debugLog('✗ Error sending message:', error.message);
+        debugLog('Full error:', error);
         
         try {
             const authToken = req.token;
@@ -2862,7 +2894,7 @@ app.post('/api/send-message', verifyAnyToken, async (req, res) => {
                 increment: 1
             }, authToken);
         } catch (e) {
-            console.error('Failed to update stats:', e.message);
+            debugLog('Failed to update stats:', e.message);
         }
         
         res.status(500).json({ 
@@ -3324,9 +3356,20 @@ app.get("/api/status", verifyAuth, async (req, res) => {
     let isConnected = false;
 
     if (client) {
-      const state = await client.getState();
-      isConnected = state === "CONNECTED";
-      debugLog(`Client state: ${state}, connected: ${isConnected}`);
+      // ⭐ FIX: Add proper state check with timeout
+      try {
+        const statePromise = client.getState();
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), 5000)
+        );
+
+        const state = await Promise.race([statePromise, timeoutPromise]);
+        isConnected = state === "CONNECTED";
+        debugLog(`Client state: ${state}, connected: ${isConnected}`);
+      } catch (error) {
+        debugLog(`Error checking client state: ${error.message}`);
+        isConnected = false;
+      }
     }
 
     const session = await callPHPAPI(
@@ -3337,13 +3380,24 @@ app.get("/api/status", verifyAuth, async (req, res) => {
     );
     const stats = await callPHPAPI("/stats/get", "GET", null, req.token);
 
+    // ⭐ CRITICAL FIX: Calculate ready correctly
+    // OLD (WRONG):
+    // ready: isConnected && session?.is_active
+    
+    // NEW (CORRECT):
+    const ready = isConnected && session?.is_active === 1;
+
     debugLog("Status response:", {
-      ready: isConnected && session?.is_active,
+      ready: ready,
+      isConnected: isConnected,
+      sessionActive: session?.is_active,
       session,
       stats,
     });
+
     res.json({
-      ready: isConnected && session?.is_active,
+      ready: ready,  // ⭐ Use the calculated ready value
+      connected: isConnected,
       session: session || null,
       stats,
     });
