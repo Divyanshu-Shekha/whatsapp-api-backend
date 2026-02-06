@@ -665,6 +665,203 @@ async function initializeClientForUser(userId, token, forceNew = false) {
   return await initPromise;
 }
 
+// Add this function (NEW)
+async function initializeClientForDevice(userId, deviceId, phoneNumber, token, forceNew = false) {
+  const clientKey = `${userId}-${deviceId}`;
+
+  if (initializationPromises.has(clientKey)) {
+    debugLog(`Device initialization already in progress for ${clientKey}, reusing promise...`);
+    return await initializationPromises.get(clientKey);
+  }
+
+  const initPromise = (async () => {
+    try {
+      clientInitializing.set(clientKey, true);
+      debugLog(`Starting client initialization for device ${deviceId} (user ${userId})`);
+
+      // Clean existing client if exists
+      if (clients.has(clientKey)) {
+        const oldClient = clients.get(clientKey);
+        debugLog(`Destroying existing client for device ${deviceId}`);
+        try {
+          await oldClient.destroy();
+        } catch (error) {
+          debugLog(`Error destroying old client: ${error.message}`);
+        }
+        clients.delete(clientKey);
+        eventListenersAttached.delete(clientKey);
+      }
+
+      // Clean QR code and state
+      qrCodes.delete(clientKey);
+      clientInitializing.delete(clientKey);
+
+      // Clean auth data if forceNew
+      if (forceNew) {
+        debugLog(`Force cleaning auth data for device ${deviceId}`);
+        await cleanStaleAuthData(clientKey);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+
+      debugLog(`Creating new WhatsApp client for device ${deviceId}`);
+
+      const client = new Client({
+        authStrategy: new LocalAuth({
+          clientId: `device-${deviceId}`, // Unique ID for device
+        }),
+        puppeteer: {
+          headless: true,
+          executablePath: chromePath,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+          ]
+        }
+      });
+
+      // QR Code handler
+      client.once("qr", async (qr) => {
+        debugLog(`QR Code received for device ${deviceId}`);
+        try {
+          const qrData = await qrcode.toDataURL(qr);
+          qrCodes.set(clientKey, qrData);
+          debugLog(`QR Code generated and stored for device ${deviceId}`);
+        } catch (qrError) {
+          debugLog(`Error generating QR code: ${qrError.message}`);
+        }
+      });
+
+      // Authentication handler
+      client.once("authenticated", async () => {
+        debugLog(`Device ${deviceId} authenticated successfully`);
+        qrCodes.delete(clientKey);
+      });
+
+      // Ready handler
+      client.once("ready", async () => {
+        debugLog(`WhatsApp client ready for device ${deviceId}`);
+        try {
+          const info = client.info;
+          debugLog(`Device client info: ${info.pushname} (${info.wid.user})`);
+
+          // Update device in database
+          await callPHPAPI(
+            `/devices/${deviceId}/update`,
+            "POST",
+            {
+              phone_number: info.wid.user,
+              pushname: info.pushname,
+              is_active: 1,
+              last_active: new Date().toISOString()
+            },
+            token
+          );
+
+          debugLog(`✅ Database updated for device ${deviceId}`);
+        } catch (error) {
+          debugLog(`Error in ready handler for device ${deviceId}: ${error.message}`);
+        }
+      });
+
+      // Message handler for device
+      client.on("message", async (message) => {
+        try {
+          const contact = await message.getContact();
+          const myInfo = client.info;
+
+          await callPHPAPI(
+            "/stats/update",
+            "POST",
+            {
+              field: "received",
+              increment: 1,
+            },
+            token,
+          );
+
+          const hasMedia = message.hasMedia;
+          let mediaType = null;
+          let mediaUrl = null;
+
+          if (hasMedia) {
+            try {
+              const media = await message.downloadMedia();
+              if (media) {
+                mediaType = media.mimetype.split("/")[0];
+                const extension = media.mimetype.split("/")[1] || "bin";
+                const filename = `${Date.now()}_${message.id.id}.${extension}`;
+                const filepath = path.join("uploads", filename);
+                fs.writeFileSync(filepath, media.data, "base64");
+                mediaUrl = `/uploads/${filename}`;
+              }
+            } catch (mediaError) {
+              debugLog("Error downloading media:", mediaError);
+            }
+          }
+
+          await callPHPAPI(
+            "/messages/save",
+            "POST",
+            {
+              message_id: message.id.id,
+              type: "received",
+              from_number: contact.number,
+              from_name: contact.name || contact.pushname || contact.number,
+              to_number: myInfo.wid.user,
+              to_name: myInfo.pushname,
+              message_body: message.body || null,
+              has_media: hasMedia,
+              media_type: mediaType,
+              media_url: mediaUrl,
+              status: "received",
+              timestamp: message.timestamp,
+              device_id: deviceId
+            },
+            token,
+          );
+
+          debugLog(`✓ Message saved for device ${deviceId}`);
+        } catch (error) {
+          debugLog(`✗ Error saving received message for device ${deviceId}:`, error);
+        }
+      });
+
+      debugLog(`🚀 Initializing WhatsApp client for device ${deviceId}...`);
+      await client.initialize();
+
+      clients.set(clientKey, client);
+      clientInitializing.delete(clientKey);
+
+      debugLog(`✅ Client successfully initialized for device ${deviceId}`);
+
+      return client;
+    } catch (error) {
+      debugLog(`✗ Error initializing client for device ${deviceId}:`, error.message);
+
+      // Clean up on error
+      clientInitializing.delete(clientKey);
+      initializationPromises.delete(clientKey);
+      eventListenersAttached.delete(clientKey);
+
+      throw error;
+    }
+  })();
+
+  initializationPromises.set(clientKey, initPromise);
+
+  initPromise.finally(() => {
+    initializationPromises.delete(clientKey);
+  });
+
+  return await initPromise;
+}
+
 // Add Device - Associate token with phone number
 app.get("/api/devices", verifyAuth, async (req, res) => {
   debugLog(`GET /api/devices called by user ${req.userId}`);
@@ -1533,202 +1730,7 @@ function getRandomConnectedDevice(userId, devices) {
 }
 
 // Initialize WhatsApp Client
-// Add this function (NEW)
-async function initializeClientForDevice(userId, deviceId, phoneNumber, token, forceNew = false) {
-  const clientKey = `${userId}-${deviceId}`;
 
-  if (initializationPromises.has(clientKey)) {
-    debugLog(`Device initialization already in progress for ${clientKey}, reusing promise...`);
-    return await initializationPromises.get(clientKey);
-  }
-
-  const initPromise = (async () => {
-    try {
-      clientInitializing.set(clientKey, true);
-      debugLog(`Starting client initialization for device ${deviceId} (user ${userId})`);
-
-      // Clean existing client if exists
-      if (clients.has(clientKey)) {
-        const oldClient = clients.get(clientKey);
-        debugLog(`Destroying existing client for device ${deviceId}`);
-        try {
-          await oldClient.destroy();
-        } catch (error) {
-          debugLog(`Error destroying old client: ${error.message}`);
-        }
-        clients.delete(clientKey);
-        eventListenersAttached.delete(clientKey);
-      }
-
-      // Clean QR code and state
-      qrCodes.delete(clientKey);
-      clientInitializing.delete(clientKey);
-
-      // Clean auth data if forceNew
-      if (forceNew) {
-        debugLog(`Force cleaning auth data for device ${deviceId}`);
-        await cleanStaleAuthData(clientKey);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-
-      debugLog(`Creating new WhatsApp client for device ${deviceId}`);
-
-      const client = new Client({
-        authStrategy: new LocalAuth({
-          clientId: `device-${deviceId}`, // Unique ID for device
-        }),
-        puppeteer: {
-          headless: true,
-          executablePath: chromePath,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-          ]
-        }
-      });
-
-      // QR Code handler
-      client.once("qr", async (qr) => {
-        debugLog(`QR Code received for device ${deviceId}`);
-        try {
-          const qrData = await qrcode.toDataURL(qr);
-          qrCodes.set(clientKey, qrData);
-          debugLog(`QR Code generated and stored for device ${deviceId}`);
-        } catch (qrError) {
-          debugLog(`Error generating QR code: ${qrError.message}`);
-        }
-      });
-
-      // Authentication handler
-      client.once("authenticated", async () => {
-        debugLog(`Device ${deviceId} authenticated successfully`);
-        qrCodes.delete(clientKey);
-      });
-
-      // Ready handler
-      client.once("ready", async () => {
-        debugLog(`WhatsApp client ready for device ${deviceId}`);
-        try {
-          const info = client.info;
-          debugLog(`Device client info: ${info.pushname} (${info.wid.user})`);
-
-          // Update device in database
-          await callPHPAPI(
-            `/devices/${deviceId}/update`,
-            "POST",
-            {
-              phone_number: info.wid.user,
-              pushname: info.pushname,
-              is_active: 1,
-              last_active: new Date().toISOString()
-            },
-            token
-          );
-
-          debugLog(`✅ Database updated for device ${deviceId}`);
-        } catch (error) {
-          debugLog(`Error in ready handler for device ${deviceId}: ${error.message}`);
-        }
-      });
-
-      // Message handler for device
-      client.on("message", async (message) => {
-        try {
-          const contact = await message.getContact();
-          const myInfo = client.info;
-
-          await callPHPAPI(
-            "/stats/update",
-            "POST",
-            {
-              field: "received",
-              increment: 1,
-            },
-            token,
-          );
-
-          const hasMedia = message.hasMedia;
-          let mediaType = null;
-          let mediaUrl = null;
-
-          if (hasMedia) {
-            try {
-              const media = await message.downloadMedia();
-              if (media) {
-                mediaType = media.mimetype.split("/")[0];
-                const extension = media.mimetype.split("/")[1] || "bin";
-                const filename = `${Date.now()}_${message.id.id}.${extension}`;
-                const filepath = path.join("uploads", filename);
-                fs.writeFileSync(filepath, media.data, "base64");
-                mediaUrl = `/uploads/${filename}`;
-              }
-            } catch (mediaError) {
-              debugLog("Error downloading media:", mediaError);
-            }
-          }
-
-          await callPHPAPI(
-            "/messages/save",
-            "POST",
-            {
-              message_id: message.id.id,
-              type: "received",
-              from_number: contact.number,
-              from_name: contact.name || contact.pushname || contact.number,
-              to_number: myInfo.wid.user,
-              to_name: myInfo.pushname,
-              message_body: message.body || null,
-              has_media: hasMedia,
-              media_type: mediaType,
-              media_url: mediaUrl,
-              status: "received",
-              timestamp: message.timestamp,
-              device_id: deviceId
-            },
-            token,
-          );
-
-          debugLog(`✓ Message saved for device ${deviceId}`);
-        } catch (error) {
-          debugLog(`✗ Error saving received message for device ${deviceId}:`, error);
-        }
-      });
-
-      debugLog(`🚀 Initializing WhatsApp client for device ${deviceId}...`);
-      await client.initialize();
-
-      clients.set(clientKey, client);
-      clientInitializing.delete(clientKey);
-
-      debugLog(`✅ Client successfully initialized for device ${deviceId}`);
-
-      return client;
-    } catch (error) {
-      debugLog(`✗ Error initializing client for device ${deviceId}:`, error.message);
-
-      // Clean up on error
-      clientInitializing.delete(clientKey);
-      initializationPromises.delete(clientKey);
-      eventListenersAttached.delete(clientKey);
-
-      throw error;
-    }
-  })();
-
-  initializationPromises.set(clientKey, initPromise);
-
-  initPromise.finally(() => {
-    initializationPromises.delete(clientKey);
-  });
-
-  return await initPromise;
-}
 // WhatsApp Routes
 app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
   debugLog(`POST /api/whatsapp/initialize called by user ${req.userId}`);
