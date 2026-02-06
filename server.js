@@ -569,29 +569,49 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       });
 
       // Ready handler
-      client.once("ready", async () => {
-        debugLog(`WhatsApp client ready for user ${userId}`);
-        try {
-          const info = client.info;
-          debugLog(`Client info: ${info.pushname} (${info.wid.user})`);
+    client.once("ready", async () => {
+  debugLog(`WhatsApp client ready for user ${userId}`);
+  try {
+    const info = client.info;
+    debugLog(`Client info: ${info.pushname} (${info.wid.user})`);
 
-          // Update session in database
-          await callPHPAPI(
-            "/whatsapp/session/update",
-            "POST",
-            {
-              phone_number: info.wid.user,
-              pushname: info.pushname,
-              is_active: true,
-            },
-            token,
-          );
+    // ⭐ ENHANCED: Update session with retry logic
+    let updateSuccess = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        debugLog(`Attempt ${attempt + 1}/3 to update database session...`);
+        
+        const updateResult = await callPHPAPI(
+          "/whatsapp/session/update",
+          "POST",
+          {
+            phone_number: info.wid.user,
+            pushname: info.pushname,
+            is_active: 1,  // ⭐ Use 1 instead of true for MySQL compatibility
+          },
+          token,
+        );
 
-          debugLog(`Database session updated for user ${userId}`);
-        } catch (error) {
-          debugLog(`Error updating session: ${error.message}`);
+        debugLog(`Database update result:`, updateResult);
+        updateSuccess = true;
+        break;
+      } catch (error) {
+        debugLog(`Attempt ${attempt + 1} failed: ${error.message}`);
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      });
+      }
+    }
+
+    if (updateSuccess) {
+      debugLog(`✅ Database session updated successfully for user ${userId}`);
+    } else {
+      debugLog(`❌ Failed to update database session for user ${userId}`);
+    }
+  } catch (error) {
+    debugLog(`Error in ready handler: ${error.message}`);
+  }
+});
 
       // Configure heartbeat
       configureClientHeartbeat(client, userId, token);
@@ -1888,14 +1908,12 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
         } else {
           const statePromise = client.getState();
           const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("State check timeout")), 100000),
+            setTimeout(() => reject(new Error("State check timeout")), 10000),
           );
 
           clientState = await Promise.race([statePromise, timeoutPromise]);
           isConnected = clientState === "CONNECTED";
-          debugLog(
-            `Status check - Client state for user ${req.userId}: ${clientState}`,
-          );
+          debugLog(`Status check - Client state for user ${req.userId}: ${clientState}`);
         }
       } catch (error) {
         debugLog(`Error checking client state: ${error.message}`);
@@ -1910,6 +1928,7 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       }
     }
 
+    // Fetch session from database
     let session = null;
     try {
       debugLog("Fetching session from database...");
@@ -1923,43 +1942,58 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       debugLog(`No session in DB for user ${req.userId}: ${error.message}`);
     }
 
-    // FIXED LOGIC: Prioritize client state over database
-    // If client says CONNECTED, we should trust it
-    let actuallyConnected = isConnected;
-    
-    // If client is connected but DB doesn't know it yet, update DB
+    // ⭐ KEY FIX: If client is connected but DB doesn't reflect it, update DB
     if (isConnected && (!session || session?.is_active !== 1)) {
-      debugLog(`Client connected but DB not updated. Marking as connected.`);
+      debugLog(`🔧 FIX: Client connected but DB shows inactive. Updating database...`);
       
-      // Optionally update DB in background
       try {
+        const info = client.info;
         await callPHPAPI(
-          "/whatsapp/session/update-status",
+          "/whatsapp/session/update",
           "POST",
-          { is_active: 1, last_connected: new Date().toISOString() },
+          {
+            phone_number: info.wid.user,
+            pushname: info.pushname,
+            is_active: true,
+          },
           req.token,
         );
-        debugLog("Database status updated");
+        debugLog("✅ Database status updated successfully");
+        
+        // Fetch updated session
+        session = await callPHPAPI(
+          "/whatsapp/session/get",
+          "GET",
+          null,
+          req.token,
+        );
       } catch (dbError) {
-        debugLog(`Failed to update DB: ${dbError.message}`);
-        // Don't fail if DB update fails
+        debugLog(`❌ Failed to update DB: ${dbError.message}`);
       }
     }
 
+    // Fetch stats
+    let stats = null;
+    try {
+      stats = await callPHPAPI("/stats/get", "GET", null, req.token);
+    } catch (error) {
+      debugLog(`Error fetching stats: ${error.message}`);
+    }
+
     debugLog(`Status response:`, {
-      connected: actuallyConnected,
+      connected: isConnected,
       clientActive: isConnected,
       clientState,
       sessionActive: session?.is_active,
     });
 
     res.json({
-      connected: actuallyConnected, // Use client state as source of truth
+      connected: isConnected, // Use actual client state as source of truth
       session: session || null,
       clientActive: isConnected,
       clientState,
+      stats: stats || null,
       timestamp: Date.now(),
-      // Add helpful debug info for frontend
       debug: {
         clientConnected: isConnected,
         dbActive: session?.is_active || 0,
@@ -1974,6 +2008,7 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
     });
   }
 });
+
 
 // Export for use in main server file
 module.exports = {
