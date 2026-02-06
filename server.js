@@ -44,9 +44,6 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Environment variables
-// const PHP_API_URL =
-//   process.env.PHP_API_URL || "http://localhost/whatsapp-api/api.php";
-// const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const PHP_API_URL =
   process.env.PHP_API_URL || "https://sendwatsapp.in/whatsapp-api/api.php";
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://sendwatsapp.in";
@@ -90,7 +87,6 @@ const upload = multer({ storage });
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-// WhatsApp Client Management
 // WhatsApp Client Management
 const clients = new Map();
 const qrCodes = new Map();
@@ -419,8 +415,6 @@ if (!chromePath) {
     throw new Error('Chrome executable not found. Please check Docker installation.');
 }
 
-
-
 // NEW: Middleware to verify API tokens (for external API calls)
 async function verifyApiToken(req, res, next) {
   const token = extractToken(req);
@@ -450,7 +444,8 @@ async function verifyApiToken(req, res, next) {
     debugLog(`Verifying API token for request: ${req.method} ${req.path}`);
 
     // Verify API token by calling PHP API
-    const result = await callPHPAPI("/tokens/verify", "POST", { token });
+    // FIX: Don't send token in body, just use it as the auth header
+    const result = await callPHPAPI("/tokens/verify", "POST", {}, token); // Only token in headers
 
     if (!result || !result.valid) {
       debugLog("Invalid API token received:", result);
@@ -481,11 +476,45 @@ async function verifyApiToken(req, res, next) {
     // Clear from cache
     tokenCache.delete(`api_${token}`);
 
+    // Provide more detailed error information
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      return res.status(401).json({
+        error: "Invalid API token",
+        code: "INVALID_API_TOKEN",
+        details: "Token is invalid or expired",
+      });
+    }
+
     return res.status(401).json({
-      error: "Invalid API token",
+      error: "Token verification failed",
       code: "INVALID_API_TOKEN",
-      details: error.response?.data?.error || "Token verification failed",
+      details: error.response?.data?.error || "Could not verify token",
     });
+  }
+}
+
+// NEW: Combined middleware - accepts both JWT and API tokens
+async function verifyAnyToken(req, res, next) {
+  debugLog(`verifyAnyToken middleware called for path: ${req.path}`);
+  const token = extractToken(req);
+
+  if (!token) {
+    debugLog("No token provided");
+    return res.status(401).json({ error: "Authentication token required" });
+  }
+
+  // Check token length to determine type
+  // JWT tokens are much longer (3 parts separated by dots)
+  // API tokens are typically 64 characters (sha256 hash)
+
+  const isJWT = token.includes(".") && token.split(".").length === 3;
+
+  if (isJWT) {
+    debugLog("Detected JWT token, using JWT auth");
+    return verifyAuth(req, res, next);
+  } else {
+    debugLog("Detected API token, using API token auth");
+    return verifyApiToken(req, res, next);
   }
 }
 
@@ -862,469 +891,339 @@ async function initializeClientForDevice(userId, deviceId, phoneNumber, token, f
   return await initPromise;
 }
 
-// Add Device - Associate token with phone number
-app.get("/api/devices", verifyAuth, async (req, res) => {
-  debugLog(`GET /api/devices called by user ${req.userId}`);
-  try {
-    const devices = await callPHPAPI("/devices/list", "GET", null, req.token);
-
-    // Enhance with real-time connection status
-    const enhancedDevices = devices.map((device) => {
-      const clientKey = `${req.userId}-${device.device_id}`;
-      const isConnected = clients.has(clientKey);
-      let clientState = "DISCONNECTED";
-
-      if (isConnected) {
-        try {
-          const client = clients.get(clientKey);
-          // Don't await here, just check if client exists
-          clientState = "CONNECTED";
-        } catch (error) {
-          clientState = "ERROR";
-        }
-      }
-
-      return {
-        ...device,
-        isConnected,
-        clientState,
-      };
-    });
-
-    debugLog(`Returning ${enhancedDevices.length} devices`);
-    res.json(enhancedDevices);
-  } catch (error) {
-    debugLog("Get devices error:", error);
-    res.status(500).json({ error: error.message });
+// Helper to safely delete auth folder
+async function safeDeleteAuthFolder(
+  authPath,
+  maxRetries = 8,
+  baseDelay = 1000,
+) {
+  if (!fs.existsSync(authPath)) {
+    return true;
   }
-});
-app.post("/api/devices/add", verifyAuth, async (req, res) => {
-  debugLog(`POST /api/devices/add called by user ${req.userId}`);
-  debugLog("Request body:", req.body);
 
-  try {
-    const { token, phoneNumber, deviceName } = req.body;
-
-    if (!token || !phoneNumber) {
-      debugLog("Missing required fields: token or phoneNumber");
-      return res
-        .status(400)
-        .json({ error: "Token and phone number are required" });
-    }
-
-    // Clean phone number
-    const cleanNumber = phoneNumber.replace(/[^\d]/g, "");
-
-    // Verify token exists in database and belongs to user
-    debugLog("Verifying token in database...");
-    const tokenData = await callPHPAPI(
-      "/tokens/verify",
-      "POST",
-      { token },
-      req.token,
-    );
-
-    if (!tokenData || !tokenData.valid || tokenData.user_id !== req.userId) {
-      debugLog("Invalid token or token does not belong to user:", tokenData);
-      return res
-        .status(400)
-        .json({ error: "Invalid token or token does not belong to you" });
-    }
-
-    // Check if token is already assigned
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      debugLog("Checking if token is already assigned...");
-      const existingDevice = await callPHPAPI(
-        "/devices/by-token",
-        "POST",
-        { token },
-        req.token,
-      );
-      if (existingDevice && existingDevice.id) {
-        debugLog("Token already assigned to device:", existingDevice);
-        return res.status(400).json({
-          error:
-            "This token is already assigned to: " +
-            (existingDevice.device_name || existingDevice.device_id),
-        });
-      }
-    } catch (error) {
-      debugLog("Token not assigned - this is good:", error.message);
-    }
-
-    const deviceId = `device-${Date.now()}`;
-
-    // Store device-token mapping in memory
-    deviceTokens.set(token, {
-      userId: req.userId,
-      phoneNumber: cleanNumber,
-      deviceId: deviceId,
-      deviceName: deviceName || `Device ${cleanNumber}`,
-      createdAt: new Date(),
-      isActive: false,
-    });
-
-    // Add to user's devices
-    if (!userDevices.has(req.userId)) {
-      userDevices.set(req.userId, []);
-    }
-    userDevices.get(req.userId).push(deviceId);
-
-    // Save to database
-    debugLog("Saving device to database...");
-    await callPHPAPI(
-      "/devices/add",
-      "POST",
-      {
-        device_id: deviceId,
-        device_name: deviceName || `Device ${cleanNumber}`,
-        phone_number: cleanNumber,
-        token: token,
-      },
-      req.token,
-    );
-
-    debugLog(`Device added successfully: ${deviceId}`);
-    res.json({
-      success: true,
-      deviceId,
-      message: "Device added successfully",
-    });
-  } catch (error) {
-    debugLog("Add device error:", error);
-
-    if (error.response?.data?.error) {
-      return res.status(error.response.status || 500).json({
-        error: error.response.data.error,
-      });
-    }
-
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Update device (for webhook URL, etc.)
-app.post("/api/devices/:deviceId/update", verifyAuth, async (req, res) => {
-  debugLog(
-    `POST /api/devices/${req.params.deviceId}/update called by user ${req.userId}`,
-  );
-  debugLog("Request body:", req.body);
-
-  try {
-    const { deviceId } = req.params;
-    const { webhook_url, phone_number, pushname, is_active } = req.body;
-
-    await callPHPAPI(
-      `/devices/${deviceId}/update`,
-      "POST",
-      {
-        webhook_url,
-        phone_number,
-        pushname,
-        is_active,
-      },
-      req.token,
-    );
-
-    debugLog(`Device ${deviceId} updated successfully`);
-    res.json({
-      success: true,
-      message: "Device updated successfully",
-    });
-  } catch (error) {
-    debugLog("Update device error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get all devices for user
-app.get("/api/devices", verifyAuth, async (req, res) => {
-  debugLog(`GET /api/devices called by user ${req.userId}`);
-  try {
-    const devices = await callPHPAPI("/devices/list", "GET", null, req.token);
-
-    // Enhance with connection status
-    const enhancedDevices = devices.map((device) => {
-      const isConnected = clients.has(`${req.userId}-${device.device_id}`);
-      return {
-        ...device,
-        isConnected,
-        clientState: isConnected ? "CONNECTED" : "DISCONNECTED",
-      };
-    });
-
-    debugLog(`Returning ${enhancedDevices.length} devices`);
-    res.json(enhancedDevices);
-  } catch (error) {
-    debugLog("Get devices error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Initialize WhatsApp for specific device
-app.post("/api/devices/:deviceId/initialize", verifyAuth, async (req, res) => {
-  debugLog(
-    `POST /api/devices/${req.params.deviceId}/initialize called by user ${req.userId}`,
-  );
-
-  try {
-    const { deviceId } = req.params;
-
-    // Get device info from database
-    debugLog(`Fetching device info for ${deviceId}...`);
-    const device = await callPHPAPI(
-      `/devices/${deviceId}`,
-      "GET",
-      null,
-      req.token,
-    );
-
-    if (!device) {
-      debugLog(`Device ${deviceId} not found`);
-      return res.status(404).json({ error: "Device not found" });
-    }
-
-    const clientKey = `${req.userId}-${deviceId}`;
-
-    // Check if already initializing
-    if (initializationPromises.has(clientKey)) {
-      debugLog(`Initialization already in progress for ${clientKey}`);
-      return res.status(409).json({
-        error: "Initialization already in progress",
-        message: "Please wait for the current initialization to complete",
-      });
-    }
-
-    // Clean existing client
-    if (clients.has(clientKey)) {
-      const client = clients.get(clientKey);
-      try {
-        await client.destroy();
-      } catch (error) {
-        debugLog(`Error destroying client: ${error.message}`);
-      }
-      clients.delete(clientKey);
-      eventListenersAttached.delete(clientKey);
-    }
-
-    qrCodes.delete(clientKey);
-    clientInitializing.delete(clientKey);
-
-    // Clean auth data
-    debugLog(`Cleaning auth data for ${clientKey}...`);
-    await cleanStaleAuthData(`${req.userId}-${deviceId}`);
-    // await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Initialize client for this device
-    await initializeClientForDevice(
-      req.userId,
-      deviceId,
-      device.phone_number,
-      req.token,
-      true,
-    );
-
-    debugLog(`Device ${deviceId} initialization started`);
-    res.json({
-      success: true,
-      message: "Device initializing, please scan QR code",
-      deviceId,
-    });
-  } catch (error) {
-    debugLog("Device initialize error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get QR code for specific device
-app.get("/api/devices/:deviceId/qr", verifyAuth, async (req, res) => {
-  debugLog(
-    `GET /api/devices/${req.params.deviceId}/qr called by user ${req.userId}`,
-  );
-
-  try {
-    const { deviceId } = req.params;
-    const clientKey = `${req.userId}-${deviceId}`;
-
-    const client = clients.get(clientKey);
-
-    if (client) {
-      try {
-        const state = await client.getState();
-
-        if (state === "CONNECTED") {
-          const device = await callPHPAPI(
-            `/devices/${deviceId}`,
-            "GET",
-            null,
-            req.token,
+      // First, try to close any Chrome processes that might be using these files
+      if (process.platform === "win32") {
+        try {
+          const { execSync } = require("child_process");
+          // Kill any Chrome processes that might be locking files
+          execSync(
+            "taskkill /f /im chrome.exe /t 2>nul || taskkill /f /im chromedriver.exe /t 2>nul",
+            { stdio: "ignore" },
           );
-          debugLog(`Device ${deviceId} is already connected`);
-          return res.json({
-            qr: null,
-            ready: true,
-            device,
-          });
+        } catch (e) {
+          // Ignore errors - processes might not exist
         }
-      } catch (error) {
-        debugLog(`Error checking client state: ${error.message}`);
+      }
+
+      // Wait with exponential backoff
+      const delay = baseDelay * Math.pow(2, attempt);
+      if (attempt > 0) {
+        debugLog(
+          `Retry ${attempt}/${maxRetries} to delete auth folder (waiting ${delay}ms)...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
+      // Try to remove individual files first before the folder
+      const files = fs.readdirSync(authPath);
+      for (const file of files) {
+        const filePath = path.join(authPath, file);
+        try {
+          if (fs.statSync(filePath).isFile()) {
+            fs.unlinkSync(filePath);
+          } else {
+            fs.rmSync(filePath, { recursive: true, force: true });
+          }
+        } catch (fileError) {
+          debugLog(`Could not delete ${filePath}: ${fileError.message}`);
+          // Continue with other files
+        }
+      }
+
+      // Now try to delete the main folder
+      fs.rmSync(authPath, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 1000,
+      });
+
+      debugLog(`Successfully deleted auth data: ${authPath}`);
+      return true;
+    } catch (error) {
+      if (attempt === maxRetries - 1) {
+        debugLog(
+          `Failed to delete auth folder after ${maxRetries} attempts: ${error.message}`,
+        );
+
+        // Mark for deletion on next startup
+        try {
+          const cleanupMarker = path.join(
+            "./auth_data",
+            `cleanup-needed-${Date.now()}`,
+          );
+          fs.writeFileSync(cleanupMarker, authPath);
+        } catch (e) {}
+
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+// Function to kill any lingering Chrome processes
+async function killChromeProcesses() {
+  if (process.platform !== "win32") return;
+
+  try {
+    const { execSync } = require("child_process");
+
+    // List of processes that might lock files
+    const processes = ["chrome.exe", "chromedriver.exe", "node.exe"];
+
+    for (const proc of processes) {
+      try {
+        execSync(
+          `tasklist /fi "imagename eq ${proc}" | find /i "${proc}" >nul && (
+                    taskkill /f /im ${proc} /t
+                    echo Killed ${proc}
+                ) || echo ${proc} not running`,
+          { stdio: "ignore", shell: true },
+        );
+      } catch (e) {
+        // Process might not exist, which is fine
       }
     }
 
-    const qr = qrCodes.get(clientKey);
-
-    debugLog(`Returning QR status for ${deviceId}:`, { hasQR: !!qr });
-    res.json({
-      qr: qr || null,
-      ready: false,
-      deviceId,
-    });
-  } catch (error) {
-    debugLog("QR fetch error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Disconnect specific device
-app.post("/api/devices/:deviceId/disconnect", verifyAuth, async (req, res) => {
-  debugLog(
-    `POST /api/devices/${req.params.deviceId}/disconnect called by user ${req.userId}`,
-  );
-
-  try {
-    const { deviceId } = req.params;
-    const clientKey = `${req.userId}-${deviceId}`;
-
-    const client = clients.get(clientKey);
-
-    if (client) {
-      await safeDestroyClient(client, clientKey);
-    }
-
-    clients.delete(clientKey);
-    qrCodes.delete(clientKey);
-    clientInitializing.delete(clientKey);
-    initializationPromises.delete(clientKey);
-
-    // Update database
-    debugLog(`Updating database for device ${deviceId}...`);
-    await callPHPAPI(`/devices/${deviceId}/disconnect`, "POST", {}, req.token);
-
-    // Clean auth data
-    await cleanStaleAuthData(`${req.userId}-${deviceId}`);
-
-    debugLog(`Device ${deviceId} disconnected successfully`);
-    res.json({
-      success: true,
-      message: "Device disconnected successfully",
-    });
-  } catch (error) {
-    debugLog("Device disconnect error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Delete device
-app.delete("/api/devices/:deviceId", verifyAuth, async (req, res) => {
-  debugLog(
-    `DELETE /api/devices/${req.params.deviceId} called by user ${req.userId}`,
-  );
-
-  try {
-    const { deviceId } = req.params;
-    const clientKey = `${req.userId}-${deviceId}`;
-
-    // Disconnect if connected
-    const client = clients.get(clientKey);
-    if (client) {
-      await safeDestroyClient(client, clientKey);
-    }
-
-    // Clean up
-    clients.delete(clientKey);
-    qrCodes.delete(clientKey);
-
-    // Remove from database
-    debugLog(`Deleting device ${deviceId} from database...`);
-    await callPHPAPI(`/devices/${deviceId}`, "DELETE", null, req.token);
-
-    debugLog(`Device ${deviceId} deleted successfully`);
-    res.json({
-      success: true,
-      message: "Device deleted successfully",
-    });
-  } catch (error) {
-    debugLog("Delete device error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get("/api/auth/check-token", async (req, res) => {
-  debugLog(`GET /api/auth/check-token called`);
-
-  try {
-    const token = extractToken(req);
-
-    if (!token) {
-      debugLog("No token provided");
-      return res.json({ valid: false, reason: "NO_TOKEN" });
-    }
-
-    // Check cache first
-    const cachedData = getCachedToken(token);
-    if (cachedData) {
-      debugLog("Using cached token data");
-      return res.json({
-        valid: true,
-        user: cachedData.user,
-        cached: true,
+    // Additional cleanup for Windows
+    try {
+      execSync("wmic process where \"name='chrome.exe'\" delete 2>nul", {
+        stdio: "ignore",
       });
-    }
-
-    // Verify with PHP API
-    debugLog("Verifying token with PHP API...");
-    const result = await callPHPAPI("/auth/token/validate", "POST", { token });
-
-    if (result.valid) {
-      debugLog("Token is valid, caching it");
-      cacheToken(token, result);
-    }
-
-    debugLog("Token validation result:", result.valid);
-    res.json(result);
+    } catch (e) {}
   } catch (error) {
-    debugLog("Token check error:", error.message);
-    res.json({
-      valid: false,
-      reason: "VERIFICATION_FAILED",
-      error: error.message,
-    });
-  }
-});
-// NEW: Combined middleware - accepts both JWT and API tokens
-async function verifyAnyToken(req, res, next) {
-  debugLog(`verifyAnyToken middleware called for path: ${req.path}`);
-  const token = extractToken(req);
-
-  if (!token) {
-    debugLog("No token provided");
-    return res.status(401).json({ error: "Authentication token required" });
-  }
-
-  // Check token length to determine type
-  // JWT tokens are much longer (3 parts separated by dots)
-  // API tokens are typically 64 characters (sha256 hash)
-
-  const isJWT = token.includes(".") && token.split(".").length === 3;
-
-  if (isJWT) {
-    debugLog("Detected JWT token, using JWT auth");
-    return verifyAuth(req, res, next);
-  } else {
-    debugLog("Detected API token, using API token auth");
-    return verifyApiToken(req, res, next);
+    debugLog("Chrome process cleanup warning:", error.message);
   }
 }
+
+// Helper to check if auth folder exists and has valid session
+function hasValidAuthSession(userId) {
+  const authPath = path.join("./auth_data", `session-user-${userId}`);
+  return fs.existsSync(authPath);
+}
+
+// Helper to clean stale auth data
+async function cleanStaleAuthData(userId) {
+  const authPath = path.join("./auth_data", `session-user-${userId}`);
+
+  if (!fs.existsSync(authPath)) {
+    return true;
+  }
+
+  debugLog(`Enhanced cleaning for user ${userId} auth data...`);
+
+  // Kill processes first
+  await killChromeProcesses();
+
+  // Wait a bit for OS to release locks
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+
+  // Use enhanced safe delete
+  const result = await safeDeleteAuthFolder(authPath);
+
+  if (!result) {
+    debugLog(
+      `Could not immediately delete auth data for user ${userId}, will retry later`,
+    );
+    // Schedule retry after 30 seconds
+    setTimeout(() => safeDeleteAuthFolder(authPath), 30000);
+  }
+
+  return result;
+}
+
+// Helper function to configure client heartbeat with fixes
+function configureClientHeartbeat(client, userId, token) {
+  // Check if already attached
+  if (eventListenersAttached.get(userId)) {
+    debugLog(
+      `Event listeners already attached for user ${userId}, skipping...`,
+    );
+    return;
+  }
+
+  eventListenersAttached.set(userId, true);
+
+  let heartbeatInterval = null;
+  let reconnectAttempts = 0;
+  const MAX_RECONNECT_ATTEMPTS = 10;
+  let isDestroyed = false;
+  let lastHeartbeatTime = Date.now();
+
+  const startHeartbeat = () => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+    }
+
+    debugLog(`Starting heartbeat for user ${userId}`);
+    // CHANGED: Increase interval from 30s to 60s to reduce load
+    heartbeatInterval = setInterval(async () => {
+      if (isDestroyed) {
+        debugLog(`Heartbeat stopped - client destroyed for user ${userId}`);
+        stopHeartbeat();
+        return;
+      }
+
+      try {
+        // More robust browser check
+        if (
+          !client?.pupBrowser?.isConnected?.() ||
+          client.pupBrowser.process?.killed
+        ) {
+          debugLog(`Browser not available for user ${userId}`);
+          return; // Don't destroy, just skip this cycle
+        }
+
+        const statePromise = client.getState();
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("State check timeout")), 10000),
+        );
+
+        const state = await Promise.race([statePromise, timeoutPromise]);
+        lastHeartbeatTime = Date.now();
+
+        if (state === "CONNECTED") {
+          debugLog(`Heartbeat OK - Client alive for user ${userId}`);
+          reconnectAttempts = 0;
+        }
+      } catch (error) {
+        // Only log significant errors
+        if (
+          !error.message.includes("Execution context was destroyed") &&
+          !error.message.includes("navigation") &&
+          !error.message.includes("Session closed") &&
+          !error.message.includes("timeout")
+        ) {
+          debugLog(`Heartbeat error for user ${userId}:`, error.message);
+        }
+      }
+    }, 60000); // Changed from 30000 to 60000 (1 minute)
+
+    return heartbeatInterval;
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+      debugLog(`Heartbeat stopped for user ${userId}`);
+    }
+  };
+
+  // Rest of the heartbeat configuration remains the same...
+  // (keep your existing event handlers)
+
+  return { startHeartbeat, stopHeartbeat };
+}
+
+// Improved client destruction with better cleanup
+async function safeDestroyClient(client, userId) {
+  if (!client) return;
+
+  try {
+    debugLog(`Starting safe destruction for user ${userId}...`);
+
+    // Stop any heartbeats first
+    if (eventListenersAttached.has(userId)) {
+      eventListenersAttached.delete(userId);
+    }
+
+    // Remove from tracking maps
+    clients.delete(userId);
+    qrCodes.delete(userId);
+    clientInitializing.delete(userId);
+    initializationPromises.delete(userId);
+
+    // Try to destroy client gracefully
+    if (typeof client.destroy === "function") {
+      await client.destroy().catch((err) => {
+        debugLog(`Graceful destroy failed: ${err.message}`);
+      });
+    }
+
+    // Kill Chrome processes
+    await killChromeProcesses();
+
+    debugLog(`Client safely destroyed for user ${userId}`);
+  } catch (error) {
+    debugLog(`Error in safeDestroyClient for user ${userId}:`, error.message);
+  }
+}
+
+function findChrome() {
+    const possiblePaths = [
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        process.env.PUPPETEER_EXECUTABLE_PATH
+    ];
+
+    for (const path of possiblePaths) {
+        if (path && fs.existsSync(path)) {
+            console.log(`✅ Found Chrome at: ${path}`);
+            return path;
+        }
+    }
+
+    console.error('❌ Chrome not found in any standard location');
+    return null;
+}
+
+function getRandomConnectedDevice(userId, devices) {
+  // Get all connected devices for this user
+  const connectedDevices = devices.filter((device) => {
+    const clientKey = `${userId}-${device.device_id}`;
+    const client = clients.get(clientKey);
+    if (!client) return false;
+
+    try {
+      // Quick check if client exists and is likely connected
+      return client.pupBrowser?.isConnected?.() !== false;
+    } catch {
+      return false;
+    }
+  });
+
+  if (connectedDevices.length === 0) return null;
+
+  // Return random device
+  const randomIndex = Math.floor(Math.random() * connectedDevices.length);
+  return connectedDevices[randomIndex];
+}
+
+// Helper function to check if value is numeric
+function isNumeric(value) {
+  if (typeof value === "number") return true;
+  if (typeof value === "string") {
+    return !isNaN(value) && !isNaN(parseFloat(value));
+  }
+  return false;
+}
+
+// Export for use in main server file
+module.exports = {
+  verifyAuth,
+  verifyApiToken,
+  verifyAnyToken,
+  callPHPAPI,
+  cacheToken,
+  getCachedToken,
+  tokenCache,
+};
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -1420,316 +1319,48 @@ app.post("/api/auth/remove-token", verifyAuth, async (req, res) => {
   }
 });
 
-// Helper to safely delete auth folder
-// Enhanced safe delete function with better resource handling
-async function safeDeleteAuthFolder(
-  authPath,
-  maxRetries = 8,
-  baseDelay = 1000,
-) {
-  if (!fs.existsSync(authPath)) {
-    return true;
-  }
-
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      // First, try to close any Chrome processes that might be using these files
-      if (process.platform === "win32") {
-        try {
-          const { execSync } = require("child_process");
-          // Kill any Chrome processes that might be locking files
-          execSync(
-            "taskkill /f /im chrome.exe /t 2>nul || taskkill /f /im chromedriver.exe /t 2>nul",
-            { stdio: "ignore" },
-          );
-        } catch (e) {
-          // Ignore errors - processes might not exist
-        }
-      }
-
-      // Wait with exponential backoff
-      const delay = baseDelay * Math.pow(2, attempt);
-      if (attempt > 0) {
-        debugLog(
-          `Retry ${attempt}/${maxRetries} to delete auth folder (waiting ${delay}ms)...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-
-      // Try to remove individual files first before the folder
-      const files = fs.readdirSync(authPath);
-      for (const file of files) {
-        const filePath = path.join(authPath, file);
-        try {
-          if (fs.statSync(filePath).isFile()) {
-            fs.unlinkSync(filePath);
-          } else {
-            fs.rmSync(filePath, { recursive: true, force: true });
-          }
-        } catch (fileError) {
-          debugLog(`Could not delete ${filePath}: ${fileError.message}`);
-          // Continue with other files
-        }
-      }
-
-      // Now try to delete the main folder
-      fs.rmSync(authPath, {
-        recursive: true,
-        force: true,
-        maxRetries: 3,
-        retryDelay: 1000,
-      });
-
-      debugLog(`Successfully deleted auth data: ${authPath}`);
-      return true;
-    } catch (error) {
-      if (attempt === maxRetries - 1) {
-        debugLog(
-          `Failed to delete auth folder after ${maxRetries} attempts: ${error.message}`,
-        );
-
-        // Mark for deletion on next startup
-        try {
-          const cleanupMarker = path.join(
-            "./auth_data",
-            `cleanup-needed-${Date.now()}`,
-          );
-          fs.writeFileSync(cleanupMarker, authPath);
-        } catch (e) {}
-
-        return false;
-      }
-    }
-  }
-  return false;
-}
-// Function to kill any lingering Chrome processes
-async function killChromeProcesses() {
-  if (process.platform !== "win32") return;
+app.get("/api/auth/check-token", async (req, res) => {
+  debugLog(`GET /api/auth/check-token called`);
 
   try {
-    const { execSync } = require("child_process");
+    const token = extractToken(req);
 
-    // List of processes that might lock files
-    const processes = ["chrome.exe", "chromedriver.exe", "node.exe"];
-
-    for (const proc of processes) {
-      try {
-        execSync(
-          `tasklist /fi "imagename eq ${proc}" | find /i "${proc}" >nul && (
-                    taskkill /f /im ${proc} /t
-                    echo Killed ${proc}
-                ) || echo ${proc} not running`,
-          { stdio: "ignore", shell: true },
-        );
-      } catch (e) {
-        // Process might not exist, which is fine
-      }
+    if (!token) {
+      debugLog("No token provided");
+      return res.json({ valid: false, reason: "NO_TOKEN" });
     }
 
-    // Additional cleanup for Windows
-    try {
-      execSync("wmic process where \"name='chrome.exe'\" delete 2>nul", {
-        stdio: "ignore",
-      });
-    } catch (e) {}
-  } catch (error) {
-    debugLog("Chrome process cleanup warning:", error.message);
-  }
-}
-
-// Helper to check if auth folder exists and has valid session
-function hasValidAuthSession(userId) {
-  const authPath = path.join("./auth_data", `session-user-${userId}`);
-  return fs.existsSync(authPath);
-}
-
-// Helper to clean stale auth data
-// Enhanced stale auth data cleaner
-async function cleanStaleAuthData(userId) {
-  const authPath = path.join("./auth_data", `session-user-${userId}`);
-
-  if (!fs.existsSync(authPath)) {
-    return true;
-  }
-
-  debugLog(`Enhanced cleaning for user ${userId} auth data...`);
-
-  // Kill processes first
-  await killChromeProcesses();
-
-  // Wait a bit for OS to release locks
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  // Use enhanced safe delete
-  const result = await safeDeleteAuthFolder(authPath);
-
-  if (!result) {
-    debugLog(
-      `Could not immediately delete auth data for user ${userId}, will retry later`,
-    );
-    // Schedule retry after 30 seconds
-    setTimeout(() => safeDeleteAuthFolder(authPath), 30000);
-  }
-
-  return result;
-}
-// Helper function to configure client heartbeat with fixes
-function configureClientHeartbeat(client, userId, token) {
-  // Check if already attached
-  if (eventListenersAttached.get(userId)) {
-    debugLog(
-      `Event listeners already attached for user ${userId}, skipping...`,
-    );
-    return;
-  }
-
-  eventListenersAttached.set(userId, true);
-
-  let heartbeatInterval = null;
-  let reconnectAttempts = 0;
-  const MAX_RECONNECT_ATTEMPTS = 10;
-  let isDestroyed = false;
-  let lastHeartbeatTime = Date.now();
-
-  const startHeartbeat = () => {
-    if (heartbeatInterval) {
-      clearInterval(heartbeatInterval);
-    }
-
-    debugLog(`Starting heartbeat for user ${userId}`);
-    // CHANGED: Increase interval from 30s to 60s to reduce load
-    heartbeatInterval = setInterval(async () => {
-      if (isDestroyed) {
-        debugLog(`Heartbeat stopped - client destroyed for user ${userId}`);
-        stopHeartbeat();
-        return;
-      }
-
-      try {
-        // More robust browser check
-        if (
-          !client?.pupBrowser?.isConnected?.() ||
-          client.pupBrowser.process?.killed
-        ) {
-          debugLog(`Browser not available for user ${userId}`);
-          return; // Don't destroy, just skip this cycle
-        }
-
-        const statePromise = client.getState();
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("State check timeout")), 10000),
-        );
-
-        const state = await Promise.race([statePromise, timeoutPromise]);
-        lastHeartbeatTime = Date.now();
-
-        if (state === "CONNECTED") {
-          debugLog(`Heartbeat OK - Client alive for user ${userId}`);
-          reconnectAttempts = 0;
-        }
-      } catch (error) {
-        // Only log significant errors
-        if (
-          !error.message.includes("Execution context was destroyed") &&
-          !error.message.includes("navigation") &&
-          !error.message.includes("Session closed") &&
-          !error.message.includes("timeout")
-        ) {
-          debugLog(`Heartbeat error for user ${userId}:`, error.message);
-        }
-      }
-    }, 60000); // Changed from 30000 to 60000 (1 minute)
-
-    return heartbeatInterval;
-  };
-
-  const stopHeartbeat = () => {
-    if (heartbeatInterval) {
-      clearInterval(heartbeatInterval);
-      heartbeatInterval = null;
-      debugLog(`Heartbeat stopped for user ${userId}`);
-    }
-  };
-
-  // Rest of the heartbeat configuration remains the same...
-  // (keep your existing event handlers)
-
-  return { startHeartbeat, stopHeartbeat };
-}
-
-app.post("/api/whatsapp/check-and-recover", verifyAuth, async (req, res) => {
-  debugLog(`POST /api/whatsapp/check-and-recover called by user ${req.userId}`);
-
-  try {
-    const client = clients.get(req.userId);
-
-    if (!client) {
-      debugLog("No client instance found");
+    // Check cache first
+    const cachedData = getCachedToken(token);
+    if (cachedData) {
+      debugLog("Using cached token data");
       return res.json({
-        status: "no_client",
-        message: "No client instance found",
+        valid: true,
+        user: cachedData.user,
+        cached: true,
       });
     }
 
-    try {
-      const state = await client.getState();
+    // Verify with PHP API
+    debugLog("Verifying token with PHP API...");
+    const result = await callPHPAPI("/auth/token/validate", "POST", { token });
 
-      if (state === "CONNECTED") {
-        debugLog(`Client is connected, state: ${state}`);
-        return res.json({
-          status: "connected",
-          state: state,
-        });
-      } else {
-        debugLog(`Client exists but not connected, state: ${state}`);
-        return res.json({
-          status: "not_connected",
-          state: state,
-          message: "Client exists but not connected",
-        });
-      }
-    } catch (error) {
-      // Client is stuck, clean it up
-      debugLog(
-        `Cleaning stuck client for user ${req.userId}: ${error.message}`,
-      );
-      await safeDestroyClient(client, req.userId);
-
-      return res.json({
-        status: "cleaned",
-        message: "Cleaned stuck client, please reconnect",
-      });
+    if (result.valid) {
+      debugLog("Token is valid, caching it");
+      cacheToken(token, result);
     }
+
+    debugLog("Token validation result:", result.valid);
+    res.json(result);
   } catch (error) {
-    debugLog("Error in check-and-recover:", error);
-    res.status(500).json({ error: error.message });
+    debugLog("Token check error:", error.message);
+    res.json({
+      valid: false,
+      reason: "VERIFICATION_FAILED",
+      error: error.message,
+    });
   }
 });
-
-function getRandomConnectedDevice(userId, devices) {
-  // Get all connected devices for this user
-  const connectedDevices = devices.filter((device) => {
-    const clientKey = `${userId}-${device.device_id}`;
-    const client = clients.get(clientKey);
-    if (!client) return false;
-
-    try {
-      // Quick check if client exists and is likely connected
-      return client.pupBrowser?.isConnected?.() !== false;
-    } catch {
-      return false;
-    }
-  });
-
-  if (connectedDevices.length === 0) return null;
-
-  // Return random device
-  const randomIndex = Math.floor(Math.random() * connectedDevices.length);
-  return connectedDevices[randomIndex];
-}
-
-// Initialize WhatsApp Client
 
 // WhatsApp Routes
 app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
@@ -1787,40 +1418,6 @@ app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
     });
   }
 });
-
-// Improved client destruction with better cleanup
-async function safeDestroyClient(client, userId) {
-  if (!client) return;
-
-  try {
-    debugLog(`Starting safe destruction for user ${userId}...`);
-
-    // Stop any heartbeats first
-    if (eventListenersAttached.has(userId)) {
-      eventListenersAttached.delete(userId);
-    }
-
-    // Remove from tracking maps
-    clients.delete(userId);
-    qrCodes.delete(userId);
-    clientInitializing.delete(userId);
-    initializationPromises.delete(userId);
-
-    // Try to destroy client gracefully
-    if (typeof client.destroy === "function") {
-      await client.destroy().catch((err) => {
-        debugLog(`Graceful destroy failed: ${err.message}`);
-      });
-    }
-
-    // Kill Chrome processes
-    await killChromeProcesses();
-
-    debugLog(`Client safely destroyed for user ${userId}`);
-  } catch (error) {
-    debugLog(`Error in safeDestroyClient for user ${userId}:`, error.message);
-  }
-}
 
 app.get("/api/whatsapp/qr", verifyAuth, async (req, res) => {
   debugLog(`GET /api/whatsapp/qr called by user ${req.userId}`);
@@ -1991,18 +1588,6 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
   }
 });
 
-
-// Export for use in main server file
-module.exports = {
-  verifyAuth,
-  verifyApiToken,
-  verifyAnyToken,
-  callPHPAPI,
-  cacheToken,
-  getCachedToken,
-  tokenCache,
-};
-
 app.post("/api/whatsapp/disconnect", verifyAuth, async (req, res) => {
   debugLog(`POST /api/whatsapp/disconnect called by user ${req.userId}`);
 
@@ -2120,6 +1705,56 @@ app.post("/api/whatsapp/force-cleanup", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.post("/api/whatsapp/check-and-recover", verifyAuth, async (req, res) => {
+  debugLog(`POST /api/whatsapp/check-and-recover called by user ${req.userId}`);
+
+  try {
+    const client = clients.get(req.userId);
+
+    if (!client) {
+      debugLog("No client instance found");
+      return res.json({
+        status: "no_client",
+        message: "No client instance found",
+      });
+    }
+
+    try {
+      const state = await client.getState();
+
+      if (state === "CONNECTED") {
+        debugLog(`Client is connected, state: ${state}`);
+        return res.json({
+          status: "connected",
+          state: state,
+        });
+      } else {
+        debugLog(`Client exists but not connected, state: ${state}`);
+        return res.json({
+          status: "not_connected",
+          state: state,
+          message: "Client exists but not connected",
+        });
+      }
+    } catch (error) {
+      // Client is stuck, clean it up
+      debugLog(
+        `Cleaning stuck client for user ${req.userId}: ${error.message}`,
+      );
+      await safeDestroyClient(client, req.userId);
+
+      return res.json({
+        status: "cleaned",
+        message: "Cleaned stuck client, please reconnect",
+      });
+    }
+  } catch (error) {
+    debugLog("Error in check-and-recover:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // PLANS ENDPOINTS
 // ============================================
@@ -2577,7 +2212,75 @@ app.get("/api/subscriptions/summary", verifyAnyToken, async (req, res) => {
   }
 });
 
-// Check if user has active subscription
+app.get("/api/subscriptions/has-active", verifyAnyToken, async (req, res) => {
+  debugLog(`GET /api/subscriptions/has-active called`);
+  debugLog("Auth type:", req.authType);
+  debugLog("User ID:", req.userId);
+
+  try {
+    debugLog("Calling PHP API: /subscriptions/active");
+    // ADD THIS DEBUG LINE:
+    debugLog(
+      "Full PHP API URL will be:",
+      `${PHP_API_URL}/subscriptions/active`,
+    );
+
+    const activeSubscription = await callPHPAPI(
+      "/subscriptions/active",
+      "GET",
+      null,
+      req.token,
+    );
+
+    debugLog("PHP API Response:", activeSubscription);
+    debugLog("Response type:", typeof activeSubscription);
+
+    // Check response structure
+    if (activeSubscription) {
+      debugLog(
+        "Response has success:",
+        activeSubscription.success !== undefined,
+      );
+      debugLog(
+        "Response has has_active_subscription:",
+        activeSubscription.has_active_subscription !== undefined,
+      );
+      debugLog("Response has data:", activeSubscription.data !== undefined);
+    }
+
+    const hasActive =
+      activeSubscription &&
+      activeSubscription.success &&
+      activeSubscription.has_active_subscription === true;
+
+    debugLog(`User has active subscription: ${hasActive}`);
+
+    res.json({
+      success: true,
+      hasActive: hasActive,
+      subscription: hasActive ? activeSubscription.data : null,
+      message: hasActive
+        ? "Active subscription found"
+        : "No active subscription",
+      debug: DEBUG_MODE
+        ? {
+            rawResponse: activeSubscription,
+            userId: req.userId,
+          }
+        : undefined,
+    });
+  } catch (error) {
+    debugLog("Error checking active subscription:", error.message);
+    debugLog("Error details:", error);
+
+    res.status(500).json({
+      success: false,
+      error: error.message || "Failed to check active subscription",
+      code: "CHECK_ACTIVE_ERROR",
+      details: error.responseData || null,
+    });
+  }
+});
 
 // Get subscription usage stats
 app.get("/api/subscriptions/:id/usage", verifyAnyToken, async (req, res) => {
@@ -2684,88 +2387,380 @@ app.get("/api/subscriptions/:id/usage", verifyAnyToken, async (req, res) => {
   }
 });
 
-// Helper function to check if value is numeric
-function isNumeric(value) {
-  if (typeof value === "number") return true;
-  if (typeof value === "string") {
-    return !isNaN(value) && !isNaN(parseFloat(value));
-  }
-  return false;
-}
+// Add Device - Associate token with phone number
+app.get("/api/devices", verifyAuth, async (req, res) => {
+  debugLog(`GET /api/devices called by user ${req.userId}`);
+  try {
+    const devices = await callPHPAPI("/devices/list", "GET", null, req.token);
 
-// Messaging Routes - Accept both JWT and API tokens
-// Replace the existing send-message route
-// Also fix the send message route error handling
-app.get("/api/subscriptions/has-active", verifyAnyToken, async (req, res) => {
-  debugLog(`GET /api/subscriptions/has-active called`);
-  debugLog("Auth type:", req.authType);
-  debugLog("User ID:", req.userId);
+    // Enhance with real-time connection status
+    const enhancedDevices = devices.map((device) => {
+      const clientKey = `${req.userId}-${device.device_id}`;
+      const isConnected = clients.has(clientKey);
+      let clientState = "DISCONNECTED";
+
+      if (isConnected) {
+        try {
+          const client = clients.get(clientKey);
+          // Don't await here, just check if client exists
+          clientState = "CONNECTED";
+        } catch (error) {
+          clientState = "ERROR";
+        }
+      }
+
+      return {
+        ...device,
+        isConnected,
+        clientState,
+      };
+    });
+
+    debugLog(`Returning ${enhancedDevices.length} devices`);
+    res.json(enhancedDevices);
+  } catch (error) {
+    debugLog("Get devices error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+app.post("/api/devices/add", verifyAuth, async (req, res) => {
+  debugLog(`POST /api/devices/add called by user ${req.userId}`);
+  debugLog("Request body:", req.body);
 
   try {
-    debugLog("Calling PHP API: /subscriptions/active");
-    // ADD THIS DEBUG LINE:
-    debugLog(
-      "Full PHP API URL will be:",
-      `${PHP_API_URL}/subscriptions/active`,
+    const { token, phoneNumber, deviceName } = req.body;
+
+    if (!token || !phoneNumber) {
+      debugLog("Missing required fields: token or phoneNumber");
+      return res
+        .status(400)
+        .json({ error: "Token and phone number are required" });
+    }
+
+    // Clean phone number
+    const cleanNumber = phoneNumber.replace(/[^\d]/g, "");
+
+    // Verify token exists in database and belongs to user
+    debugLog("Verifying token in database...");
+    const tokenData = await callPHPAPI(
+      "/tokens/verify",
+      "POST",
+      { token },
+      req.token,
     );
 
-    const activeSubscription = await callPHPAPI(
-      "/subscriptions/active",
+    if (!tokenData || !tokenData.valid || tokenData.user_id !== req.userId) {
+      debugLog("Invalid token or token does not belong to user:", tokenData);
+      return res
+        .status(400)
+        .json({ error: "Invalid token or token does not belong to you" });
+    }
+
+    // Check if token is already assigned
+    try {
+      debugLog("Checking if token is already assigned...");
+      const existingDevice = await callPHPAPI(
+        "/devices/by-token",
+        "POST",
+        { token },
+        req.token,
+      );
+      if (existingDevice && existingDevice.id) {
+        debugLog("Token already assigned to device:", existingDevice);
+        return res.status(400).json({
+          error:
+            "This token is already assigned to: " +
+            (existingDevice.device_name || existingDevice.device_id),
+        });
+      }
+    } catch (error) {
+      debugLog("Token not assigned - this is good:", error.message);
+    }
+
+    const deviceId = `device-${Date.now()}`;
+
+    // Store device-token mapping in memory
+    deviceTokens.set(token, {
+      userId: req.userId,
+      phoneNumber: cleanNumber,
+      deviceId: deviceId,
+      deviceName: deviceName || `Device ${cleanNumber}`,
+      createdAt: new Date(),
+      isActive: false,
+    });
+
+    // Add to user's devices
+    if (!userDevices.has(req.userId)) {
+      userDevices.set(req.userId, []);
+    }
+    userDevices.get(req.userId).push(deviceId);
+
+    // Save to database
+    debugLog("Saving device to database...");
+    await callPHPAPI(
+      "/devices/add",
+      "POST",
+      {
+        device_id: deviceId,
+        device_name: deviceName || `Device ${cleanNumber}`,
+        phone_number: cleanNumber,
+        token: token,
+      },
+      req.token,
+    );
+
+    debugLog(`Device added successfully: ${deviceId}`);
+    res.json({
+      success: true,
+      deviceId,
+      message: "Device added successfully",
+    });
+  } catch (error) {
+    debugLog("Add device error:", error);
+
+    if (error.response?.data?.error) {
+      return res.status(error.response.status || 500).json({
+        error: error.response.data.error,
+      });
+    }
+
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update device (for webhook URL, etc.)
+app.post("/api/devices/:deviceId/update", verifyAuth, async (req, res) => {
+  debugLog(
+    `POST /api/devices/${req.params.deviceId}/update called by user ${req.userId}`,
+  );
+  debugLog("Request body:", req.body);
+
+  try {
+    const { deviceId } = req.params;
+    const { webhook_url, phone_number, pushname, is_active } = req.body;
+
+    await callPHPAPI(
+      `/devices/${deviceId}/update`,
+      "POST",
+      {
+        webhook_url,
+        phone_number,
+        pushname,
+        is_active,
+      },
+      req.token,
+    );
+
+    debugLog(`Device ${deviceId} updated successfully`);
+    res.json({
+      success: true,
+      message: "Device updated successfully",
+    });
+  } catch (error) {
+    debugLog("Update device error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Initialize WhatsApp for specific device
+app.post("/api/devices/:deviceId/initialize", verifyAuth, async (req, res) => {
+  debugLog(
+    `POST /api/devices/${req.params.deviceId}/initialize called by user ${req.userId}`,
+  );
+
+  try {
+    const { deviceId } = req.params;
+
+    // Get device info from database
+    debugLog(`Fetching device info for ${deviceId}...`);
+    const device = await callPHPAPI(
+      `/devices/${deviceId}`,
       "GET",
       null,
       req.token,
     );
 
-    debugLog("PHP API Response:", activeSubscription);
-    debugLog("Response type:", typeof activeSubscription);
-
-    // Check response structure
-    if (activeSubscription) {
-      debugLog(
-        "Response has success:",
-        activeSubscription.success !== undefined,
-      );
-      debugLog(
-        "Response has has_active_subscription:",
-        activeSubscription.has_active_subscription !== undefined,
-      );
-      debugLog("Response has data:", activeSubscription.data !== undefined);
+    if (!device) {
+      debugLog(`Device ${deviceId} not found`);
+      return res.status(404).json({ error: "Device not found" });
     }
 
-    const hasActive =
-      activeSubscription &&
-      activeSubscription.success &&
-      activeSubscription.has_active_subscription === true;
+    const clientKey = `${req.userId}-${deviceId}`;
 
-    debugLog(`User has active subscription: ${hasActive}`);
+    // Check if already initializing
+    if (initializationPromises.has(clientKey)) {
+      debugLog(`Initialization already in progress for ${clientKey}`);
+      return res.status(409).json({
+        error: "Initialization already in progress",
+        message: "Please wait for the current initialization to complete",
+      });
+    }
 
+    // Clean existing client
+    if (clients.has(clientKey)) {
+      const client = clients.get(clientKey);
+      try {
+        await client.destroy();
+      } catch (error) {
+        debugLog(`Error destroying client: ${error.message}`);
+      }
+      clients.delete(clientKey);
+      eventListenersAttached.delete(clientKey);
+    }
+
+    qrCodes.delete(clientKey);
+    clientInitializing.delete(clientKey);
+
+    // Clean auth data
+    debugLog(`Cleaning auth data for ${clientKey}...`);
+    await cleanStaleAuthData(`${req.userId}-${deviceId}`);
+    // await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Initialize client for this device
+    await initializeClientForDevice(
+      req.userId,
+      deviceId,
+      device.phone_number,
+      req.token,
+      true,
+    );
+
+    debugLog(`Device ${deviceId} initialization started`);
     res.json({
       success: true,
-      hasActive: hasActive,
-      subscription: hasActive ? activeSubscription.data : null,
-      message: hasActive
-        ? "Active subscription found"
-        : "No active subscription",
-      debug: DEBUG_MODE
-        ? {
-            rawResponse: activeSubscription,
-            userId: req.userId,
-          }
-        : undefined,
+      message: "Device initializing, please scan QR code",
+      deviceId,
     });
   } catch (error) {
-    debugLog("Error checking active subscription:", error.message);
-    debugLog("Error details:", error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message || "Failed to check active subscription",
-      code: "CHECK_ACTIVE_ERROR",
-      details: error.responseData || null,
-    });
+    debugLog("Device initialize error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
+// Get QR code for specific device
+app.get("/api/devices/:deviceId/qr", verifyAuth, async (req, res) => {
+  debugLog(
+    `GET /api/devices/${req.params.deviceId}/qr called by user ${req.userId}`,
+  );
+
+  try {
+    const { deviceId } = req.params;
+    const clientKey = `${req.userId}-${deviceId}`;
+
+    const client = clients.get(clientKey);
+
+    if (client) {
+      try {
+        const state = await client.getState();
+
+        if (state === "CONNECTED") {
+          const device = await callPHPAPI(
+            `/devices/${deviceId}`,
+            "GET",
+            null,
+            req.token,
+          );
+          debugLog(`Device ${deviceId} is already connected`);
+          return res.json({
+            qr: null,
+            ready: true,
+            device,
+          });
+        }
+      } catch (error) {
+        debugLog(`Error checking client state: ${error.message}`);
+      }
+    }
+
+    const qr = qrCodes.get(clientKey);
+
+    debugLog(`Returning QR status for ${deviceId}:`, { hasQR: !!qr });
+    res.json({
+      qr: qr || null,
+      ready: false,
+      deviceId,
+    });
+  } catch (error) {
+    debugLog("QR fetch error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Disconnect specific device
+app.post("/api/devices/:deviceId/disconnect", verifyAuth, async (req, res) => {
+  debugLog(
+    `POST /api/devices/${req.params.deviceId}/disconnect called by user ${req.userId}`,
+  );
+
+  try {
+    const { deviceId } = req.params;
+    const clientKey = `${req.userId}-${deviceId}`;
+
+    const client = clients.get(clientKey);
+
+    if (client) {
+      await safeDestroyClient(client, clientKey);
+    }
+
+    clients.delete(clientKey);
+    qrCodes.delete(clientKey);
+    clientInitializing.delete(clientKey);
+    initializationPromises.delete(clientKey);
+
+    // Update database
+    debugLog(`Updating database for device ${deviceId}...`);
+    await callPHPAPI(`/devices/${deviceId}/disconnect`, "POST", {}, req.token);
+
+    // Clean auth data
+    await cleanStaleAuthData(`${req.userId}-${deviceId}`);
+
+    debugLog(`Device ${deviceId} disconnected successfully`);
+    res.json({
+      success: true,
+      message: "Device disconnected successfully",
+    });
+  } catch (error) {
+    debugLog("Device disconnect error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete device
+app.delete("/api/devices/:deviceId", verifyAuth, async (req, res) => {
+  debugLog(
+    `DELETE /api/devices/${req.params.deviceId} called by user ${req.userId}`,
+  );
+
+  try {
+    const { deviceId } = req.params;
+    const clientKey = `${req.userId}-${deviceId}`;
+
+    // Disconnect if connected
+    const client = clients.get(clientKey);
+    if (client) {
+      await safeDestroyClient(client, clientKey);
+    }
+
+    // Clean up
+    clients.delete(clientKey);
+    qrCodes.delete(clientKey);
+
+    // Remove from database
+    debugLog(`Deleting device ${deviceId} from database...`);
+    await callPHPAPI(`/devices/${deviceId}`, "DELETE", null, req.token);
+
+    debugLog(`Device ${deviceId} deleted successfully`);
+    res.json({
+      success: true,
+      message: "Device deleted successfully",
+    });
+  } catch (error) {
+    debugLog("Delete device error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Messaging Routes - Accept both JWT and API tokens
 app.post('/api/send-message', verifyAnyToken, async (req, res) => {
     try {
         const { number, message, deviceId } = req.body;
@@ -3150,8 +3145,6 @@ app.get("/api/chats", verifyApiToken, async (req, res) => {
   }
 });
 
-// Replace your /api/contacts endpoint with this safer version
-
 app.get("/api/contacts", verifyApiToken, async (req, res) => {
   debugLog(`GET /api/contacts called`);
   debugLog("Auth type:", req.authType);
@@ -3382,10 +3375,6 @@ app.get("/api/status", verifyAuth, async (req, res) => {
     const stats = await callPHPAPI("/stats/get", "GET", null, req.token);
 
     // ⭐ CRITICAL FIX: Calculate ready correctly
-    // OLD (WRONG):
-    // ready: isConnected && session?.is_active
-    
-    // NEW (CORRECT):
     const ready = isConnected && session?.is_active === 1;
 
     debugLog("Status response:", {
