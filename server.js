@@ -388,31 +388,32 @@ async function verifyAuth(req, res, next) {
   }
 }
 
-
 function findChrome() {
-    const possiblePaths = [
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        process.env.PUPPETEER_EXECUTABLE_PATH
-    ];
+  const possiblePaths = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+  ];
 
-    for (const path of possiblePaths) {
-        if (path && fs.existsSync(path)) {
-            console.log(`✅ Found Chrome at: ${path}`);
-            return path;
-        }
+  for (const path of possiblePaths) {
+    if (path && fs.existsSync(path)) {
+      console.log(`✅ Found Chrome at: ${path}`);
+      return path;
     }
+  }
 
-    console.error('❌ Chrome not found in any standard location');
-    return null;
+  console.error("❌ Chrome not found in any standard location");
+  return null;
 }
 
 const chromePath = findChrome();
 
 if (!chromePath) {
-    throw new Error('Chrome executable not found. Please check Docker installation.');
+  throw new Error(
+    "Chrome executable not found. Please check Docker installation.",
+  );
 }
 
 // NEW: Middleware to verify API tokens (for external API calls)
@@ -561,23 +562,23 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       debugLog(`Creating new WhatsApp client for user ${userId}`);
 
-     const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        executablePath: chromePath, // Use system Chrome
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-        ]
-    }
-});
+      const client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+          headless: true,
+          executablePath: chromePath, // Use system Chrome
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+          ],
+        },
+      });
 
       // QR Code handler
       client.once("qr", async (qr) => {
@@ -598,49 +599,53 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       });
 
       // Ready handler
-    client.once("ready", async () => {
-  debugLog(`WhatsApp client ready for user ${userId}`);
-  try {
-    const info = client.info;
-    debugLog(`Client info: ${info.pushname} (${info.wid.user})`);
+      client.once("ready", async () => {
+        debugLog(`WhatsApp client ready for user ${userId}`);
+        try {
+          const info = client.info;
+          debugLog(`Client info: ${info.pushname} (${info.wid.user})`);
 
-    // ⭐ ENHANCED: Update session with retry logic
-    let updateSuccess = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        debugLog(`Attempt ${attempt + 1}/3 to update database session...`);
-        
-        const updateResult = await callPHPAPI(
-          "/whatsapp/session/update",
-          "POST",
-          {
-            phone_number: info.wid.user,
-            pushname: info.pushname,
-            is_active: 1,  // ⭐ Use 1 instead of true for MySQL compatibility
-          },
-          token,
-        );
+          // ⭐ ENHANCED: Update session with retry logic
+          let updateSuccess = false;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              debugLog(
+                `Attempt ${attempt + 1}/3 to update database session...`,
+              );
 
-        debugLog(`Database update result:`, updateResult);
-        updateSuccess = true;
-        break;
-      } catch (error) {
-        debugLog(`Attempt ${attempt + 1} failed: ${error.message}`);
-        if (attempt < 2) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+              const updateResult = await callPHPAPI(
+                "/whatsapp/session/update",
+                "POST",
+                {
+                  phone_number: info.wid.user,
+                  pushname: info.pushname,
+                  is_active: 1, // ⭐ Use 1 instead of true for MySQL compatibility
+                },
+                token,
+              );
+
+              debugLog(`Database update result:`, updateResult);
+              updateSuccess = true;
+              break;
+            } catch (error) {
+              debugLog(`Attempt ${attempt + 1} failed: ${error.message}`);
+              if (attempt < 2) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              }
+            }
+          }
+
+          if (updateSuccess) {
+            debugLog(
+              `✅ Database session updated successfully for user ${userId}`,
+            );
+          } else {
+            debugLog(`❌ Failed to update database session for user ${userId}`);
+          }
+        } catch (error) {
+          debugLog(`Error in ready handler: ${error.message}`);
         }
-      }
-    }
-
-    if (updateSuccess) {
-      debugLog(`✅ Database session updated successfully for user ${userId}`);
-    } else {
-      debugLog(`❌ Failed to update database session for user ${userId}`);
-    }
-  } catch (error) {
-    debugLog(`Error in ready handler: ${error.message}`);
-  }
-});
+      });
 
       // Configure heartbeat
       configureClientHeartbeat(client, userId, token);
@@ -695,18 +700,28 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 }
 
 // Add this function (NEW)
-async function initializeClientForDevice(userId, deviceId, phoneNumber, token, forceNew = false) {
+async function initializeClientForDevice(
+  userId,
+  deviceId,
+  phoneNumber,
+  token,
+  forceNew = false,
+) {
   const clientKey = `${userId}-${deviceId}`;
 
   if (initializationPromises.has(clientKey)) {
-    debugLog(`Device initialization already in progress for ${clientKey}, reusing promise...`);
+    debugLog(
+      `Device initialization already in progress for ${clientKey}, reusing promise...`,
+    );
     return await initializationPromises.get(clientKey);
   }
 
   const initPromise = (async () => {
     try {
       clientInitializing.set(clientKey, true);
-      debugLog(`Starting client initialization for device ${deviceId} (user ${userId})`);
+      debugLog(
+        `Starting client initialization for device ${deviceId} (user ${userId})`,
+      );
 
       // Clean existing client if exists
       if (clients.has(clientKey)) {
@@ -742,16 +757,16 @@ async function initializeClientForDevice(userId, deviceId, phoneNumber, token, f
           headless: true,
           executablePath: chromePath,
           args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-          ]
-        }
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process",
+            "--disable-gpu",
+          ],
+        },
       });
 
       // QR Code handler
@@ -787,14 +802,16 @@ async function initializeClientForDevice(userId, deviceId, phoneNumber, token, f
               phone_number: info.wid.user,
               pushname: info.pushname,
               is_active: 1,
-              last_active: new Date().toISOString()
+              last_active: new Date().toISOString(),
             },
-            token
+            token,
           );
 
           debugLog(`✅ Database updated for device ${deviceId}`);
         } catch (error) {
-          debugLog(`Error in ready handler for device ${deviceId}: ${error.message}`);
+          debugLog(
+            `Error in ready handler for device ${deviceId}: ${error.message}`,
+          );
         }
       });
 
@@ -850,14 +867,17 @@ async function initializeClientForDevice(userId, deviceId, phoneNumber, token, f
               media_url: mediaUrl,
               status: "received",
               timestamp: message.timestamp,
-              device_id: deviceId
+              device_id: deviceId,
             },
             token,
           );
 
           debugLog(`✓ Message saved for device ${deviceId}`);
         } catch (error) {
-          debugLog(`✗ Error saving received message for device ${deviceId}:`, error);
+          debugLog(
+            `✗ Error saving received message for device ${deviceId}:`,
+            error,
+          );
         }
       });
 
@@ -871,7 +891,10 @@ async function initializeClientForDevice(userId, deviceId, phoneNumber, token, f
 
       return client;
     } catch (error) {
-      debugLog(`✗ Error initializing client for device ${deviceId}:`, error.message);
+      debugLog(
+        `✗ Error initializing client for device ${deviceId}:`,
+        error.message,
+      );
 
       // Clean up on error
       clientInitializing.delete(clientKey);
@@ -1164,23 +1187,23 @@ async function safeDestroyClient(client, userId) {
 }
 
 function findChrome() {
-    const possiblePaths = [
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        process.env.PUPPETEER_EXECUTABLE_PATH
-    ];
+  const possiblePaths = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+  ];
 
-    for (const path of possiblePaths) {
-        if (path && fs.existsSync(path)) {
-            console.log(`✅ Found Chrome at: ${path}`);
-            return path;
-        }
+  for (const path of possiblePaths) {
+    if (path && fs.existsSync(path)) {
+      console.log(`✅ Found Chrome at: ${path}`);
+      return path;
     }
+  }
 
-    console.error('❌ Chrome not found in any standard location');
-    return null;
+  console.error("❌ Chrome not found in any standard location");
+  return null;
 }
 
 function getRandomConnectedDevice(userId, devices) {
@@ -1399,7 +1422,7 @@ app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
     debugLog(`Starting WhatsApp initialization for user ${req.userId}`);
 
     // ✅ FIX: Start initialization (don't await fully)
-    initializeClientForUser(req.userId, req.token, true).catch(err => {
+    initializeClientForUser(req.userId, req.token, true).catch((err) => {
       debugLog(`Background initialization error: ${err.message}`);
     });
 
@@ -1414,11 +1437,11 @@ app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
         return res.json({
           success: true,
           message: "QR code ready",
-          qrReady: true
+          qrReady: true,
         });
       }
-      
-      await new Promise(resolve => setTimeout(resolve, checkInterval));
+
+      await new Promise((resolve) => setTimeout(resolve, checkInterval));
       waited += checkInterval;
     }
 
@@ -1428,9 +1451,8 @@ app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
     res.json({
       success: true,
       message: "WhatsApp client initializing, please wait for QR code",
-      qrReady: false
+      qrReady: false,
     });
-
   } catch (error) {
     debugLog("Initialize error:", error.message);
     res.status(500).json({
@@ -1498,14 +1520,14 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
     const client = clients.get(req.userId);
     let isConnected = false;
     let clientState = "NONE";
-    
+
     // ⭐ FIX: Better connection checking
     if (client) {
       try {
         // Check if browser is alive and client is initialized
         const browserConnected = client.pupBrowser?.isConnected?.();
         const pageConnected = client.pupPage?.isClosed?.() === false;
-        
+
         if (browserConnected && pageConnected) {
           // Try to get state with timeout
           try {
@@ -1513,18 +1535,19 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
             const timeoutPromise = new Promise((_, reject) =>
               setTimeout(() => reject(new Error("State check timeout")), 5000),
             );
-            
+
             clientState = await Promise.race([statePromise, timeoutPromise]);
             isConnected = clientState === "CONNECTED";
-            
+
             // ⭐ ADDITIONAL CHECK: If state is null but browser/page are connected,
             // assume we're connected (this fixes the main issue)
             if (!clientState && browserConnected && pageConnected) {
-              debugLog(`⚠️ State is null but browser/page are connected. Assuming connected.`);
+              debugLog(
+                `⚠️ State is null but browser/page are connected. Assuming connected.`,
+              );
               isConnected = true;
               clientState = "CONNECTED (assumed)";
             }
-            
           } catch (error) {
             debugLog(`State check failed: ${error.message}`);
             // If browser/page are connected but state check failed, still assume connected
@@ -1534,7 +1557,9 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
             }
           }
         } else {
-          debugLog(`Browser or page not connected: browser=${browserConnected}, page=${pageConnected}`);
+          debugLog(
+            `Browser or page not connected: browser=${browserConnected}, page=${pageConnected}`,
+          );
           clientState = "DISCONNECTED";
         }
       } catch (error) {
@@ -1558,10 +1583,12 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
     // ⭐ FIX: Use session data as fallback for connection status
     // If database says active, trust it more than client.getState()
     const sessionActive = session?.is_active === 1;
-    
+
     // ⭐ CRITICAL FIX: If database says we're active, return connected=true
     if (sessionActive && !isConnected) {
-      debugLog(`⚠️ Database says active but client.getState() says disconnected. Trusting database.`);
+      debugLog(
+        `⚠️ Database says active but client.getState() says disconnected. Trusting database.`,
+      );
       isConnected = true;
       clientState = "CONNECTED (from DB)";
     }
@@ -1590,8 +1617,8 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       debug: {
         clientConnected: isConnected,
         dbActive: session?.is_active || 0,
-        stateMismatch: isConnected !== sessionActive
-      }
+        stateMismatch: isConnected !== sessionActive,
+      },
     });
   } catch (error) {
     debugLog("Status check error:", error.message);
@@ -2775,144 +2802,159 @@ app.delete("/api/devices/:deviceId", verifyAuth, async (req, res) => {
 });
 
 // Messaging Routes - Accept both JWT and API tokens
-app.post('/api/send-message', verifyAnyToken, async (req, res) => {
-    try {
-        const { number, message, deviceId } = req.body;
-        
-        if (!number || !message) {
-            return res.status(400).json({ error: 'Number and message are required' });
-        }
+app.post("/api/send-message", verifyAnyToken, async (req, res) => {
+  try {
+    const { number, message, deviceId } = req.body;
 
-        let client;
-        let clientKey;
-        let actualDeviceId;
-
-        // FIX: Handle API tokens differently
-        if (req.authType === "api_token") {
-            // API token - find the associated device
-            const deviceData = req.apiTokenData;
-            if (deviceData && deviceData.device_id) {
-                actualDeviceId = deviceData.device_id;
-                clientKey = `${req.userId}-${actualDeviceId}`;
-                client = clients.get(clientKey);
-            } else {
-                return res.status(400).json({ 
-                    error: 'No device associated with this API token',
-                    code: 'NO_DEVICE'
-                });
-            }
-        } else {
-            // JWT token - use specified device or default
-            actualDeviceId = deviceId || 'default';
-            clientKey = `${req.userId}-${actualDeviceId}`;
-            client = clients.get(clientKey);
-        }
-
-        if (!client) {
-            debugLog(`No client found for ${clientKey}`);
-            return res.status(400).json({ 
-                error: 'WhatsApp not connected',
-                details: 'Please connect to WhatsApp first',
-                code: 'NOT_CONNECTED'
-            });
-        }
-
-        // Check client state
-        let state;
-        try {
-            state = await client.getState();
-            debugLog(`Client state before sending: ${state}`);
-        } catch (stateError) {
-            debugLog(`Error checking state: ${stateError.message}`);
-            return res.status(400).json({ 
-                error: 'WhatsApp client error',
-                details: 'Client is not responding',
-                code: 'CLIENT_ERROR'
-            });
-        }
-
-        if (state !== 'CONNECTED') {
-            debugLog(`Client not ready, state: ${state}`);
-            return res.status(400).json({ 
-                error: 'WhatsApp not ready',
-                state: state,
-                code: 'NOT_READY',
-                details: 'Please wait for WhatsApp to connect'
-            });
-        }
-
-        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
-        
-        debugLog(`📤 Sending message to ${chatId} (User: ${req.userId})`);
-        const sentMessage = await client.sendMessage(chatId, message);
-        debugLog(`✓ Message sent successfully: ${sentMessage.id.id}`);
-
-        let contactName = number;
-        try {
-            const contact = await client.getContactById(chatId);
-            contactName = contact.name || contact.pushname || number;
-        } catch (err) {
-            debugLog('Could not get contact name:', err.message);
-        }
-
-        const myInfo = client.info;
-
-        // Save to database
-        try {
-            await callPHPAPI('/messages/save', 'POST', {
-                message_id: sentMessage.id.id,
-                type: 'sent',
-                from_number: myInfo.wid.user,
-                from_name: myInfo.pushname,
-                to_number: number,
-                to_name: contactName,
-                message_body: message,
-                has_media: false,
-                status: 'sent',
-                timestamp: sentMessage.timestamp,
-                device_id: actualDeviceId
-            }, req.token);
-            
-            debugLog('Message saved to database');
-        } catch (dbError) {
-            debugLog('❌ Database save failed:', dbError.message);
-        }
-
-        // Update stats
-        try {
-            await callPHPAPI('/stats/update', 'POST', {
-                field: 'sent',
-                increment: 1
-            }, req.token);
-        } catch (statsError) {
-            debugLog('❌ Stats update failed:', statsError.message);
-        }
-
-        res.json({ 
-            success: true, 
-            message: 'Message sent successfully',
-            messageId: sentMessage.id.id,
-            deviceId: actualDeviceId
-        });
-    } catch (error) {
-        debugLog('✗ Error sending message:', error.message);
-        debugLog('Full error:', error);
-        
-        try {
-            await callPHPAPI('/stats/update', 'POST', {
-                field: 'failed',
-                increment: 1
-            }, req.token);
-        } catch (e) {
-            debugLog('Failed to update stats:', e.message);
-        }
-        
-        res.status(500).json({ 
-            success: false, 
-            error: error.message || 'Failed to send message',
-            code: 'SEND_MESSAGE_ERROR'
-        });
+    if (!number || !message) {
+      return res.status(400).json({ error: "Number and message are required" });
     }
+
+    let client;
+    let clientKey;
+    let actualDeviceId;
+
+    // FIX: Handle API tokens differently
+    if (req.authType === "api_token") {
+      // ⭐ SIMPLE FIX: Just use user ID without device
+      actualDeviceId = "default";
+      clientKey = req.userId; // No device suffix
+      client = clients.get(clientKey);
+
+      if (!client) {
+        debugLog(`No WhatsApp client for user ${req.userId}`);
+        return res.status(400).json({
+          error: "WhatsApp not connected",
+          details: "Please connect WhatsApp first using the dashboard",
+        });
+      }
+    } else {
+      // JWT token - use specified device or default
+      actualDeviceId = deviceId || "default";
+      clientKey = `${req.userId}-${actualDeviceId}`;
+      client = clients.get(clientKey);
+    }
+
+    if (!client) {
+      debugLog(`No client found for ${clientKey}`);
+      return res.status(400).json({
+        error: "WhatsApp not connected",
+        details: "Please connect to WhatsApp first",
+        code: "NOT_CONNECTED",
+      });
+    }
+
+    // Check client state
+    let state;
+    try {
+      state = await client.getState();
+      debugLog(`Client state before sending: ${state}`);
+    } catch (stateError) {
+      debugLog(`Error checking state: ${stateError.message}`);
+      return res.status(400).json({
+        error: "WhatsApp client error",
+        details: "Client is not responding",
+        code: "CLIENT_ERROR",
+      });
+    }
+
+    if (state !== "CONNECTED") {
+      debugLog(`Client not ready, state: ${state}`);
+      return res.status(400).json({
+        error: "WhatsApp not ready",
+        state: state,
+        code: "NOT_READY",
+        details: "Please wait for WhatsApp to connect",
+      });
+    }
+
+    const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
+
+    debugLog(`📤 Sending message to ${chatId} (User: ${req.userId})`);
+    const sentMessage = await client.sendMessage(chatId, message);
+    debugLog(`✓ Message sent successfully: ${sentMessage.id.id}`);
+
+    let contactName = number;
+    try {
+      const contact = await client.getContactById(chatId);
+      contactName = contact.name || contact.pushname || number;
+    } catch (err) {
+      debugLog("Could not get contact name:", err.message);
+    }
+
+    const myInfo = client.info;
+
+    // Save to database
+    try {
+      await callPHPAPI(
+        "/messages/save",
+        "POST",
+        {
+          message_id: sentMessage.id.id,
+          type: "sent",
+          from_number: myInfo.wid.user,
+          from_name: myInfo.pushname,
+          to_number: number,
+          to_name: contactName,
+          message_body: message,
+          has_media: false,
+          status: "sent",
+          timestamp: sentMessage.timestamp,
+          device_id: actualDeviceId,
+        },
+        req.token,
+      );
+
+      debugLog("Message saved to database");
+    } catch (dbError) {
+      debugLog("❌ Database save failed:", dbError.message);
+    }
+
+    // Update stats
+    try {
+      await callPHPAPI(
+        "/stats/update",
+        "POST",
+        {
+          field: "sent",
+          increment: 1,
+        },
+        req.token,
+      );
+    } catch (statsError) {
+      debugLog("❌ Stats update failed:", statsError.message);
+    }
+
+    res.json({
+      success: true,
+      message: "Message sent successfully",
+      messageId: sentMessage.id.id,
+      deviceId: actualDeviceId,
+    });
+  } catch (error) {
+    debugLog("✗ Error sending message:", error.message);
+    debugLog("Full error:", error);
+
+    try {
+      await callPHPAPI(
+        "/stats/update",
+        "POST",
+        {
+          field: "failed",
+          increment: 1,
+        },
+        req.token,
+      );
+    } catch (e) {
+      debugLog("Failed to update stats:", e.message);
+    }
+
+    res.status(500).json({
+      success: false,
+      error: error.message || "Failed to send message",
+      code: "SEND_MESSAGE_ERROR",
+    });
+  }
 });
 
 app.post(
@@ -3368,7 +3410,7 @@ app.get("/api/status", verifyAuth, async (req, res) => {
       try {
         const statePromise = client.getState();
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("timeout")), 5000)
+          setTimeout(() => reject(new Error("timeout")), 5000),
         );
 
         const state = await Promise.race([statePromise, timeoutPromise]);
@@ -3400,7 +3442,7 @@ app.get("/api/status", verifyAuth, async (req, res) => {
     });
 
     res.json({
-      ready: ready,  // ⭐ Use the calculated ready value
+      ready: ready, // ⭐ Use the calculated ready value
       connected: isConnected,
       session: session || null,
       stats,
