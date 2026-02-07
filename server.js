@@ -1612,18 +1612,18 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
     });
 
     res.json({
-      connected: isConnected,
-      session: session || null,
-      clientActive: isConnected,
-      clientState,
-      stats: stats || null,
-      timestamp: Date.now(),
-      debug: {
-        clientConnected: isConnected,
-        dbActive: session?.is_active || 0,
-        stateMismatch: isConnected !== (session?.is_active === 1)
-      }
-    });
+  connected: isConnected,
+  session: session || null,
+  clientActive: isConnected,
+  clientState,
+  stats: stats || null,
+  timestamp: Date.now(),
+  debug: {
+    clientConnected: isConnected,
+    dbActive: session?.is_active || 0,
+    stateMismatch: isConnected !== (session?.is_active === 1)
+  }
+});
   } catch (error) {
     debugLog("Status check error:", error.message);
     res.status(500).json({
