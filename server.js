@@ -1542,6 +1542,31 @@ app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
       debugLog(`No session in DB for user ${req.userId}: ${error.message}`);
     }
 
+    // ⭐ FIX: If DB shows active but client is not connected, clean DB
+    if (!isConnected && session && session.is_active === 1) {
+      debugLog(`⚠️ State mismatch detected! DB shows active but client is not connected. Cleaning DB...`);
+      
+      try {
+        await callPHPAPI(
+          "/whatsapp/session/disconnect",
+          "POST",
+          {},
+          req.token,
+        );
+        debugLog("✅ Database cleaned successfully");
+        
+        // Re-fetch session
+        session = await callPHPAPI(
+          "/whatsapp/session/get",
+          "GET",
+          null,
+          req.token,
+        );
+      } catch (cleanError) {
+        debugLog(`❌ Failed to clean DB: ${cleanError.message}`);
+      }
+    }
+
     // ⭐ If client connected but DB doesn't reflect it, update DB
     if (isConnected && (!session || session?.is_active !== 1)) {
       debugLog(`Client connected but DB shows inactive. Updating database...`);
