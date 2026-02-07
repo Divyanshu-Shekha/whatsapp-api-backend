@@ -1367,11 +1367,9 @@ app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
   debugLog(`POST /api/whatsapp/initialize called by user ${req.userId}`);
 
   try {
-    debugLog(`Initialize request for user ${req.userId}`);
-
     const clientKey = req.userId;
 
-    // CRITICAL FIX: Check if already connected first
+    // Check if already connected
     const existingClient = clients.get(clientKey);
     if (existingClient) {
       try {
@@ -1398,27 +1396,49 @@ app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
       });
     }
 
-    debugLog(`Proceeding with WhatsApp initialization for user ${req.userId}`);
+    debugLog(`Starting WhatsApp initialization for user ${req.userId}`);
 
-    // Initialize client with forceNew = true
-    await initializeClientForUser(req.userId, req.token, true);
+    // ✅ FIX: Start initialization (don't await fully)
+    initializeClientForUser(req.userId, req.token, true).catch(err => {
+      debugLog(`Background initialization error: ${err.message}`);
+    });
 
-    debugLog(`Initialization process started for user ${req.userId}`);
+    // ✅ FIX: Wait up to 10 seconds for QR code to appear
+    const maxWaitTime = 10000; // 10 seconds
+    const checkInterval = 500; // Check every 500ms
+    let waited = 0;
 
+    while (waited < maxWaitTime) {
+      if (qrCodes.has(clientKey)) {
+        debugLog(`QR code generated after ${waited}ms`);
+        return res.json({
+          success: true,
+          message: "QR code ready",
+          qrReady: true
+        });
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+      waited += checkInterval;
+    }
+
+    // If no QR after 10 seconds, still return success
+    // (frontend will poll for QR)
+    debugLog(`No QR after ${waited}ms, client still initializing`);
     res.json({
       success: true,
-      message: "WhatsApp client initializing, please scan QR code",
+      message: "WhatsApp client initializing, please wait for QR code",
+      qrReady: false
     });
+
   } catch (error) {
     debugLog("Initialize error:", error.message);
-
     res.status(500).json({
       error: error.message,
       message: "Failed to initialize WhatsApp. Please try again.",
     });
   }
 });
-
 app.get("/api/whatsapp/qr", verifyAuth, async (req, res) => {
   debugLog(`GET /api/whatsapp/qr called by user ${req.userId}`);
 
