@@ -2967,8 +2967,7 @@ app.post("/api/send-message", verifyAnyToken, async (req, res) => {
           message_body: message,
           has_media: false,
           status: "sent",
-          timestamp: sentMessage.timestamp,
-          device_id: actualDeviceId,
+          timestamp: sentMessage.timestamp
         },
         req.token,
       );
