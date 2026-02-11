@@ -7,38 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 
-function getChromePath() {
-  // Check common Chrome paths - UPDATED FOR RENDER
-  const possiblePaths = [
-    // Render-specific paths FIRST
-    "/opt/render/project/.apt/usr/bin/google-chrome", // Render default Chrome location
-    "/usr/bin/google-chrome-stable", // Common Linux (installed by build script)
-    "/usr/bin/google-chrome", // Alternative
-    "/usr/bin/chromium-browser", // Chromium alternative
-    "/usr/bin/chromium", // Last resort
-    process.env.CHROME_PATH, // Environment variable
-    process.env.PUPPETEER_EXECUTABLE_PATH, // Puppeteer environment variable
-  ];
 
-  console.log("🔍 Looking for Chrome in possible paths...");
-
-  for (const chromePath of possiblePaths) {
-    if (chromePath) {
-      console.log(`   Checking: ${chromePath}`);
-      try {
-        if (fs.existsSync(chromePath)) {
-          console.log(`✅ Found Chrome at: ${chromePath}`);
-          return chromePath;
-        }
-      } catch (err) {
-        console.log(`   Could not access: ${chromePath}`);
-      }
-    }
-  }
-
-  console.log("❌ Chrome not found in standard paths");
-  return null;
-}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -388,33 +357,33 @@ async function verifyAuth(req, res, next) {
   }
 }
 
-function findChrome() {
-  const possiblePaths = [
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-  ];
+// function findChrome() {
+//   const possiblePaths = [
+//     "/usr/bin/google-chrome",
+//     "/usr/bin/google-chrome-stable",
+//     "/usr/bin/chromium",
+//     "/usr/bin/chromium-browser",
+//     process.env.PUPPETEER_EXECUTABLE_PATH,
+//   ];
 
-  for (const path of possiblePaths) {
-    if (path && fs.existsSync(path)) {
-      console.log(`✅ Found Chrome at: ${path}`);
-      return path;
-    }
-  }
+//   for (const path of possiblePaths) {
+//     if (path && fs.existsSync(path)) {
+//       console.log(`✅ Found Chrome at: ${path}`);
+//       return path;
+//     }
+//   }
 
-  console.error("❌ Chrome not found in any standard location");
-  return null;
-}
+//   console.error("❌ Chrome not found in any standard location");
+//   return null;
+// }
 
-const chromePath = findChrome();
+// const chromePath = findChrome();
 
-if (!chromePath) {
-  throw new Error(
-    "Chrome executable not found. Please check Docker installation.",
-  );
-}
+// if (!chromePath) {
+//   throw new Error(
+//     "Chrome executable not found. Please check Docker installation.",
+//   );
+// }
 
 // NEW: Middleware to verify API tokens (for external API calls)
 async function verifyApiToken(req, res, next) {
@@ -1186,25 +1155,25 @@ async function safeDestroyClient(client, userId) {
   }
 }
 
-function findChrome() {
-  const possiblePaths = [
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-  ];
+// function findChrome() {
+//   const possiblePaths = [
+//     "/usr/bin/google-chrome",
+//     "/usr/bin/google-chrome-stable",
+//     "/usr/bin/chromium",
+//     "/usr/bin/chromium-browser",
+//     process.env.PUPPETEER_EXECUTABLE_PATH,
+//   ];
 
-  for (const path of possiblePaths) {
-    if (path && fs.existsSync(path)) {
-      console.log(`✅ Found Chrome at: ${path}`);
-      return path;
-    }
-  }
+//   for (const path of possiblePaths) {
+//     if (path && fs.existsSync(path)) {
+//       console.log(`✅ Found Chrome at: ${path}`);
+//       return path;
+//     }
+//   }
 
-  console.error("❌ Chrome not found in any standard location");
-  return null;
-}
+//   console.error("❌ Chrome not found in any standard location");
+//   return null;
+// }
 
 function getRandomConnectedDevice(userId, devices) {
   // Get all connected devices for this user
