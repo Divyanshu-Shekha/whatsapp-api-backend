@@ -535,7 +535,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         authStrategy: new LocalAuth(),
         puppeteer: {
           headless: true,
-          executablePath: chromePath, // Use system Chrome
+          // executablePath: chromePath, // Use system Chrome
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -724,7 +724,7 @@ async function initializeClientForDevice(
         }),
         puppeteer: {
           headless: true,
-          executablePath: chromePath,
+          // executablePath: chromePath,
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
