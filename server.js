@@ -497,8 +497,6 @@ function getPuppeteerConfig() {
       '--disable-dev-shm-usage',
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
-      '--no-zygote',
-      '--single-process',
       '--disable-gpu',
       '--disable-web-security',
       '--disable-features=IsolateOrigins,site-per-process',
@@ -524,11 +522,15 @@ function getPuppeteerConfig() {
       '--safebrowsing-disable-auto-update',
       '--enable-automation',
       '--password-store=basic',
-      '--use-mock-keychain'
+      '--use-mock-keychain',
+      // REMOVED UNSTABLE FLAGS:
+      // '--single-process',
+      // '--no-zygote',
     ],
     ignoreDefaultArgs: ['--disable-extensions'],
-    // ⭐ CRITICAL: Set timeout for browser launch
-    timeout: 60000, // 60 seconds
+    timeout: 60000,
+    // ADD THESE:
+    dumpio: false, // Don't dump browser console
   };
 }
 
@@ -902,6 +904,7 @@ async function initializeClientForDevice(
             "/messages/save",
             "POST",
             {
+              user_id: req.userId,
               message_id: message.id.id,
               type: "received",
               from_number: contact.number,
