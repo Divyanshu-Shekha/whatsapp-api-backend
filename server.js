@@ -357,7 +357,33 @@ async function verifyAuth(req, res, next) {
   }
 }
 
+// function findChrome() {
+//   const possiblePaths = [
+//     "/usr/bin/google-chrome",
+//     "/usr/bin/google-chrome-stable",
+//     "/usr/bin/chromium",
+//     "/usr/bin/chromium-browser",
+//     process.env.PUPPETEER_EXECUTABLE_PATH,
+//   ];
 
+//   for (const path of possiblePaths) {
+//     if (path && fs.existsSync(path)) {
+//       console.log(`✅ Found Chrome at: ${path}`);
+//       return path;
+//     }
+//   }
+
+//   console.error("❌ Chrome not found in any standard location");
+//   return null;
+// }
+
+// const chromePath = findChrome();
+
+// if (!chromePath) {
+//   throw new Error(
+//     "Chrome executable not found. Please check Docker installation.",
+//   );
+// }
 
 // NEW: Middleware to verify API tokens (for external API calls)
 async function verifyApiToken(req, res, next) {
@@ -509,6 +535,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         authStrategy: new LocalAuth(),
         puppeteer: {
           headless: true,
+          // executablePath: chromePath,' // Use system Chrome
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
@@ -697,6 +724,7 @@ async function initializeClientForDevice(
         }),
         puppeteer: {
           headless: true,
+          executablePath: chromePath,
           args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
