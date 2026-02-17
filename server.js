@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 5000;
 
 // Environment variables
 const PHP_API_URL =
-  process.env.PHP_API_URL || "https://rightmsg.in/whatsapp-api/api.php";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://rightmsg.in";
+  process.env.PHP_API_URL || "https://rightmsg.info/whatsapp-api/api.php";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://rightmsg.info";
 const NODE_ENV = process.env.NODE_ENV || "development";
 
 // Debug configuration
