@@ -3611,6 +3611,86 @@ app.get("/api/status", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// ============================================
+// OTP & PASSWORD RESET PROXY ROUTES
+// ============================================
+
+app.post("/api/auth/send-registration-otp", async (req, res) => {
+  debugLog(`POST /api/auth/send-registration-otp called`);
+  try {
+    const result = await callPHPAPI("/auth/send-registration-otp", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Send registration OTP error:", error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/verify-registration-otp", async (req, res) => {
+  debugLog(`POST /api/auth/verify-registration-otp called`);
+  try {
+    const result = await callPHPAPI("/auth/verify-registration-otp", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Verify registration OTP error:", error.message);
+    res.status(error.status || 400).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/send-login-otp", async (req, res) => {
+  debugLog(`POST /api/auth/send-login-otp called`);
+  try {
+    const result = await callPHPAPI("/auth/send-login-otp", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Send login OTP error:", error.message);
+    res.status(error.status || 401).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/verify-login-otp", async (req, res) => {
+  debugLog(`POST /api/auth/verify-login-otp called`);
+  try {
+    const result = await callPHPAPI("/auth/verify-login-otp", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Verify login OTP error:", error.message);
+    res.status(error.status || 400).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/send-reset-otp", async (req, res) => {
+  debugLog(`POST /api/auth/send-reset-otp called`);
+  try {
+    const result = await callPHPAPI("/auth/send-reset-otp", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Send reset OTP error:", error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/verify-reset-otp", async (req, res) => {
+  debugLog(`POST /api/auth/verify-reset-otp called`);
+  try {
+    const result = await callPHPAPI("/auth/verify-reset-otp", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Verify reset OTP error:", error.message);
+    res.status(error.status || 400).json({ error: error.message });
+  }
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  debugLog(`POST /api/auth/reset-password called`);
+  try {
+    const result = await callPHPAPI("/auth/reset-password", "POST", req.body);
+    res.json(result);
+  } catch (error) {
+    debugLog("Reset password error:", error.message);
+    res.status(error.status || 400).json({ error: error.message });
+  }
+});
 
 // Cleanup on server shutdown
 process.on("SIGTERM", gracefulShutdown);
