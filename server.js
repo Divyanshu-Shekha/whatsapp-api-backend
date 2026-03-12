@@ -1100,29 +1100,65 @@ function hasValidAuthSession(userId) {
 }
 
 // Helper to clean stale auth data
-async function cleanStaleAuthData(userId) {
-  const authPath = path.join("./auth_data", `session-user-${userId}`);
+// Track pending retries to avoid stacking
+const pendingCleanups = new Map();
 
-  if (!fs.existsSync(authPath)) {
+async function cleanStaleAuthData(userId) {
+  // Handle BOTH user and device auth path formats
+  const possiblePaths = [
+    path.join("./auth_data", `session-user-${userId}`),    // user: "42"
+    path.join("./auth_data", `session-device-${userId}`),  // device: "device-123"
+    path.join("./auth_data", `session-${userId}`),         // fallback
+  ];
+
+  // Filter to only paths that actually exist
+  const existingPaths = possiblePaths.filter(p => fs.existsSync(p));
+
+  if (existingPaths.length === 0) {
+    debugLog(`No auth data found for ${userId}, skipping cleanup`);
     return true;
   }
 
-  debugLog(`Enhanced cleaning for user ${userId} auth data...`);
+  debugLog(`Cleaning ${existingPaths.length} auth path(s) for ${userId}...`);
 
-  await killChromeProcesses();
-
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
-  const result = await safeDeleteAuthFolder(authPath);
-
-  if (!result) {
-    debugLog(
-      `Could not immediately delete auth data for user ${userId}, will retry later`,
-    );
-    setTimeout(() => safeDeleteAuthFolder(authPath), 30000);
+  // Cancel any pending retry for this userId
+  if (pendingCleanups.has(userId)) {
+    clearTimeout(pendingCleanups.get(userId));
+    pendingCleanups.delete(userId);
+    debugLog(`Cancelled pending cleanup retry for ${userId}`);
   }
 
-  return result;
+  // Only kill Chrome on Windows, and only if no other clients are active
+  if (process.platform === "win32" && clients.size === 0) {
+    await killChromeProcesses();
+    await new Promise((resolve) => setTimeout(resolve, 1000)); // shorter wait
+  }
+
+  let allSuccess = true;
+
+  for (const authPath of existingPaths) {
+    debugLog(`Deleting: ${authPath}`);
+    const result = await safeDeleteAuthFolder(authPath);
+
+    if (!result) {
+      allSuccess = false;
+      debugLog(`Could not delete ${authPath}, scheduling retry...`);
+
+      // Only schedule ONE retry per userId, not per path
+      if (!pendingCleanups.has(userId)) {
+        const retryTimer = setTimeout(async () => {
+          pendingCleanups.delete(userId);
+          debugLog(`Retrying cleanup for ${userId}...`);
+          const retryResult = await safeDeleteAuthFolder(authPath);
+          debugLog(`Retry result for ${userId}: ${retryResult}`);
+        }, 30000);
+
+        pendingCleanups.set(userId, retryTimer);
+      }
+    }
+  }
+
+  return allSuccess;
 }
 
 
@@ -1480,9 +1516,11 @@ app.get("/api/auth/check-token", async (req, res) => {
 // WhatsApp Routes
 app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
   debugLog(`POST /api/whatsapp/initialize called by user ${req.userId}`);
+  
 
   try {
     const clientKey = req.userId;
+    
 
     // Check if already connected
     const existingClient = clients.get(clientKey);
