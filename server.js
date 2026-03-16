@@ -585,8 +585,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
         puppeteer: getPuppeteerConfig(),
         // ⭐ NEW: Add these options
         webVersionCache: {
-          type: 'remote',
-          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+          type: 'local',
         },
       });
 
@@ -677,7 +676,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       debugLog(`Initializing WhatsApp client...`);
       
       const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Initialization timeout after 60 seconds')), 60000)
+        setTimeout(() => reject(new Error('Initialization timeout after 60 seconds')), 120000)
       );
       
       await Promise.race([
@@ -801,8 +800,7 @@ async function initializeClientForDevice(
         }),
         puppeteer: getPuppeteerConfig(),
         webVersionCache: {
-          type: 'remote',
-          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+          type: 'local',
         },
       });
 
@@ -934,7 +932,7 @@ async function initializeClientForDevice(
       debugLog(`🚀 Initializing WhatsApp client for device ${deviceId}...`);
       
       const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Device initialization timeout after 60 seconds')), 60000)
+        setTimeout(() => reject(new Error('Device initialization timeout after 120 seconds')), 120000)
       );
       
       await Promise.race([
