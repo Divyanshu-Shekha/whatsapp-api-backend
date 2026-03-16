@@ -528,7 +528,7 @@ function getPuppeteerConfig() {
       // '--no-zygote',
     ],
     ignoreDefaultArgs: ['--disable-extensions'],
-    timeout: 60000,
+    timeout: 120000,
     // ADD THESE:
     dumpio: false, // Don't dump browser console
   };
