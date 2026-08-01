@@ -528,7 +528,7 @@ function getPuppeteerConfig() {
       // '--no-zygote',
     ],
     ignoreDefaultArgs: ['--disable-extensions'],
-    timeout: 60000,
+    timeout: 120000,
     // ADD THESE:
     dumpio: false, // Don't dump browser console
   };
@@ -677,7 +677,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       debugLog(`Initializing WhatsApp client...`);
       
       const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Initialization timeout after 60 seconds')), 60000)
+        setTimeout(() => reject(new Error('Initialization timeout after 60 seconds')), 120000)
       );
       
       await Promise.race([
@@ -935,7 +935,7 @@ async function initializeClientForDevice(
       debugLog(`🚀 Initializing WhatsApp client for device ${deviceId}...`);
       
       const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Device initialization timeout after 60 seconds')), 60000)
+        setTimeout(() => reject(new Error('Device initialization timeout after 120 seconds')), 120000)
       );
       
       await Promise.race([
