@@ -906,7 +906,7 @@ async function initializeClientForDevice(
             "/messages/save",
             "POST",
             {
-              user_id: req.userId,
+              user_id: userId,
               message_id: message.id.id,
               type: "received",
               from_number: contact.number,
@@ -1312,32 +1312,7 @@ async function safeDestroyClient(client, userId) {
   }
 }
 
-// function getRandomConnectedDevice(userId, devices) {
-//   const connectedDevices = devices.filter((device) => {
-//     const clientKey = `${userId}-${device.device_id}`;
-//     const client = clients.get(clientKey);
-//     if (!client) return false;
 
-//     try {
-//       return client.pupBrowser?.isConnected?.() !== false;
-//     } catch {
-//       return false;
-//     }
-//   });
-
-//   if (connectedDevices.length === 0) return null;
-
-//   const randomIndex = Math.floor(Math.random() * connectedDevices.length);
-//   return connectedDevices[randomIndex];
-// }
-
-function isNumeric(value) {
-  if (typeof value === "number") return true;
-  if (typeof value === "string") {
-    return !isNaN(value) && !isNaN(parseFloat(value));
-  }
-  return false;
-}
 
 // function findChrome() {
 //   const possiblePaths = [
