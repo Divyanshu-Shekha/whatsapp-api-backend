@@ -7,8 +7,6 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 
-
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -492,42 +490,42 @@ function getPuppeteerConfig() {
   return {
     headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--disable-gpu',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-breakpad',
-      '--disable-client-side-phishing-detection',
-      '--disable-component-update',
-      '--disable-default-apps',
-      '--disable-extensions',
-      '--disable-features=TranslateUI',
-      '--disable-hang-monitor',
-      '--disable-ipc-flooding-protection',
-      '--disable-popup-blocking',
-      '--disable-prompt-on-repost',
-      '--disable-renderer-backgrounding',
-      '--disable-sync',
-      '--force-color-profile=srgb',
-      '--metrics-recording-only',
-      '--no-default-browser-check',
-      '--safebrowsing-disable-auto-update',
-      '--enable-automation',
-      '--password-store=basic',
-      '--use-mock-keychain',
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--disable-gpu",
+      "--disable-web-security",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-background-networking",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-breakpad",
+      "--disable-client-side-phishing-detection",
+      "--disable-component-update",
+      "--disable-default-apps",
+      "--disable-extensions",
+      "--disable-features=TranslateUI",
+      "--disable-hang-monitor",
+      "--disable-ipc-flooding-protection",
+      "--disable-popup-blocking",
+      "--disable-prompt-on-repost",
+      "--disable-renderer-backgrounding",
+      "--disable-sync",
+      "--force-color-profile=srgb",
+      "--metrics-recording-only",
+      "--no-default-browser-check",
+      "--safebrowsing-disable-auto-update",
+      "--enable-automation",
+      "--password-store=basic",
+      "--use-mock-keychain",
       // REMOVED UNSTABLE FLAGS:
       // '--single-process',
       // '--no-zygote',
     ],
-    ignoreDefaultArgs: ['--disable-extensions'],
+    ignoreDefaultArgs: ["--disable-extensions"],
     timeout: 120000,
     // ADD THESE:
     dumpio: false, // Don't dump browser console
@@ -547,7 +545,7 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
   const initPromise = (async () => {
     let client = null;
-    
+
     try {
       clientInitializing.set(clientKey, true);
       debugLog(`Starting client initialization for user ${userId}`);
@@ -591,12 +589,12 @@ async function initializeClientForUser(userId, token, forceNew = false) {
       });
 
       // ⭐ IMPROVED: Set up error handlers BEFORE initialization
-      client.on('error', (error) => {
+      client.on("error", (error) => {
         debugLog(`❌ Client error for user ${userId}:`, error.message);
         // Don't crash - just log
       });
 
-      client.on('disconnected', (reason) => {
+      client.on("disconnected", (reason) => {
         debugLog(`⚠️ Client disconnected for user ${userId}:`, reason);
         // Clean up
         clients.delete(clientKey);
@@ -675,16 +673,16 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       // ⭐ IMPROVED: Initialize with timeout
       debugLog(`Initializing WhatsApp client...`);
-      
-      const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Initialization timeout after 60 seconds')), 120000)
+
+      const initTimeout = new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Initialization timeout after 60 seconds")),
+          120000,
+        ),
       );
-      
-      await Promise.race([
-        client.initialize(),
-        initTimeout
-      ]);
-      
+
+      await Promise.race([client.initialize(), initTimeout]);
+
       debugLog(`Client initialization started for user ${userId}`);
 
       clients.set(clientKey, client);
@@ -705,7 +703,10 @@ async function initializeClientForUser(userId, token, forceNew = false) {
 
       return client;
     } catch (error) {
-      debugLog(`❌ Error initializing client for user ${userId}:`, error.message);
+      debugLog(
+        `❌ Error initializing client for user ${userId}:`,
+        error.message,
+      );
       debugLog(`Error stack:`, error.stack);
 
       // ⭐ IMPROVED: Clean up everything on error
@@ -763,7 +764,7 @@ async function initializeClientForDevice(
 
   const initPromise = (async () => {
     let client = null;
-    
+
     try {
       clientInitializing.set(clientKey, true);
       debugLog(
@@ -808,11 +809,11 @@ async function initializeClientForDevice(
       });
 
       // Set up error handlers
-      client.on('error', (error) => {
+      client.on("error", (error) => {
         debugLog(`❌ Device ${deviceId} error:`, error.message);
       });
 
-      client.on('disconnected', (reason) => {
+      client.on("disconnected", (reason) => {
         debugLog(`⚠️ Device ${deviceId} disconnected:`, reason);
         clients.delete(clientKey);
         qrCodes.delete(clientKey);
@@ -933,15 +934,18 @@ async function initializeClientForDevice(
       });
 
       debugLog(`🚀 Initializing WhatsApp client for device ${deviceId}...`);
-      
-      const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Device initialization timeout after 120 seconds')), 120000)
+
+      const initTimeout = new Promise((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error("Device initialization timeout after 120 seconds"),
+            ),
+          120000,
+        ),
       );
-      
-      await Promise.race([
-        client.initialize(),
-        initTimeout
-      ]);
+
+      await Promise.race([client.initialize(), initTimeout]);
 
       clients.set(clientKey, client);
       clientInitializing.delete(clientKey);
@@ -1093,7 +1097,6 @@ async function killChromeProcesses() {
   }
 }
 
-
 // Helper to check if auth folder exists and has valid session
 function hasValidAuthSession(userId) {
   const authPath = path.join("./auth_data", `session-user-${userId}`);
@@ -1186,7 +1189,6 @@ async function cleanStaleAuthData(userId) {
 
   return result;
 }
-
 
 // Helper function to configure client heartbeat with fixes
 function configureClientHeartbeat(client, userId, token) {
@@ -1292,14 +1294,11 @@ async function safeDestroyClient(client, userId) {
 
     // ⭐ IMPROVED: Try to destroy client with timeout
     if (typeof client.destroy === "function") {
-      const destroyTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Destroy timeout')), 10000)
+      const destroyTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Destroy timeout")), 10000),
       );
-      
-      await Promise.race([
-        client.destroy(),
-        destroyTimeout
-      ]).catch((err) => {
+
+      await Promise.race([client.destroy(), destroyTimeout]).catch((err) => {
         debugLog(`Graceful destroy failed: ${err.message}`);
       });
     }
@@ -1313,24 +1312,24 @@ async function safeDestroyClient(client, userId) {
   }
 }
 
-function getRandomConnectedDevice(userId, devices) {
-  const connectedDevices = devices.filter((device) => {
-    const clientKey = `${userId}-${device.device_id}`;
-    const client = clients.get(clientKey);
-    if (!client) return false;
+// function getRandomConnectedDevice(userId, devices) {
+//   const connectedDevices = devices.filter((device) => {
+//     const clientKey = `${userId}-${device.device_id}`;
+//     const client = clients.get(clientKey);
+//     if (!client) return false;
 
-    try {
-      return client.pupBrowser?.isConnected?.() !== false;
-    } catch {
-      return false;
-    }
-  });
+//     try {
+//       return client.pupBrowser?.isConnected?.() !== false;
+//     } catch {
+//       return false;
+//     }
+//   });
 
-  if (connectedDevices.length === 0) return null;
+//   if (connectedDevices.length === 0) return null;
 
-  const randomIndex = Math.floor(Math.random() * connectedDevices.length);
-  return connectedDevices[randomIndex];
-}
+//   const randomIndex = Math.floor(Math.random() * connectedDevices.length);
+//   return connectedDevices[randomIndex];
+// }
 
 function isNumeric(value) {
   if (typeof value === "number") return true;
@@ -1542,11 +1541,9 @@ app.get("/api/auth/check-token", async (req, res) => {
 // WhatsApp Routes
 app.post("/api/whatsapp/initialize", verifyAuth, async (req, res) => {
   debugLog(`POST /api/whatsapp/initialize called by user ${req.userId}`);
-  
 
   try {
     const clientKey = req.userId;
-    
 
     // Check if already connected
     const existingClient = clients.get(clientKey);
@@ -1785,73 +1782,77 @@ app.get("/api/whatsapp/qr", verifyAuth, async (req, res) => {
 //   }
 // });
 
-
 app.get("/api/whatsapp/status", verifyAuth, async (req, res) => {
   debugLog(`GET /api/whatsapp/status called by user ${req.userId}`);
 
   try {
     const client = clients.get(req.userId);
-    
+
     // ⭐ SIMPLE CHECK: If QR code exists, NOT connected
     if (qrCodes.has(req.userId)) {
       debugLog(`QR code exists for user ${req.userId} - NOT connected`);
       return res.json({
-        connected: false,  // ⭐ Definitely false
+        connected: false, // ⭐ Definitely false
         ready: false,
         needsQR: true,
         message: "Scan QR code to connect",
       });
     }
-    
+
     // ⭐ SIMPLE CHECK: No client, NOT connected
     if (!client) {
       debugLog(`No client for user ${req.userId} - NOT connected`);
       return res.json({
-        connected: false,  // ⭐ Definitely false
+        connected: false, // ⭐ Definitely false
         ready: false,
         message: "WhatsApp not initialized",
       });
     }
-    
+
     // ⭐ SIMPLE CHECK: Get actual WhatsApp state
     let isConnected = false;
     let state = "UNKNOWN";
-    
+
     try {
       state = await client.getState();
-      isConnected = state === "CONNECTED";  // ⭐ Only true if state is "CONNECTED"
-      debugLog(`Actual WhatsApp state for user ${req.userId}: ${state}, connected: ${isConnected}`);
+      isConnected = state === "CONNECTED"; // ⭐ Only true if state is "CONNECTED"
+      debugLog(
+        `Actual WhatsApp state for user ${req.userId}: ${state}, connected: ${isConnected}`,
+      );
     } catch (error) {
       debugLog(`Error getting state: ${error.message}`);
-      isConnected = false;  // ⭐ Error means not connected
+      isConnected = false; // ⭐ Error means not connected
     }
-    
+
     // Get session info (optional)
     let session = null;
     try {
-      session = await callPHPAPI("/whatsapp/session/get", "GET", null, req.token);
+      session = await callPHPAPI(
+        "/whatsapp/session/get",
+        "GET",
+        null,
+        req.token,
+      );
     } catch (error) {
       debugLog(`No session in DB: ${error.message}`);
     }
-    
+
     // ⭐ SIMPLE RESPONSE: Return actual connection status
     res.json({
-      connected: isConnected,  // ⭐ Only true if WhatsApp says "CONNECTED"
-      ready: isConnected && (session?.is_active === 1),
+      connected: isConnected, // ⭐ Only true if WhatsApp says "CONNECTED"
+      ready: isConnected && session?.is_active === 1,
       state: state,
       session: session,
       message: isConnected ? "WhatsApp is connected" : `WhatsApp is ${state}`,
     });
-    
   } catch (error) {
     debugLog("Status check error:", error.message);
-    res.status(500).json({ 
+    res.status(500).json({
       error: error.message,
-      connected: false,  // ⭐ Always false on error
+      connected: false, // ⭐ Always false on error
     });
   }
 });
-
 
 app.post("/api/whatsapp/disconnect", verifyAuth, async (req, res) => {
   debugLog(`POST /api/whatsapp/disconnect called by user ${req.userId}`);
@@ -3123,7 +3124,7 @@ app.post("/api/send-message", verifyAnyToken, async (req, res) => {
           message_body: message,
           has_media: false,
           status: "sent",
-          timestamp: sentMessage.timestamp
+          timestamp: sentMessage.timestamp,
         },
         req.token,
       );
@@ -3682,7 +3683,11 @@ app.get("/api/status", verifyAuth, async (req, res) => {
 app.post("/api/auth/send-registration-otp", async (req, res) => {
   debugLog(`POST /api/auth/send-registration-otp called`);
   try {
-    const result = await callPHPAPI("/auth/send-registration-otp", "POST", req.body);
+    const result = await callPHPAPI(
+      "/auth/send-registration-otp",
+      "POST",
+      req.body,
+    );
     res.json(result);
   } catch (error) {
     debugLog("Send registration OTP error:", error.message);
@@ -3693,7 +3698,11 @@ app.post("/api/auth/send-registration-otp", async (req, res) => {
 app.post("/api/auth/verify-registration-otp", async (req, res) => {
   debugLog(`POST /api/auth/verify-registration-otp called`);
   try {
-    const result = await callPHPAPI("/auth/verify-registration-otp", "POST", req.body);
+    const result = await callPHPAPI(
+      "/auth/verify-registration-otp",
+      "POST",
+      req.body,
+    );
     res.json(result);
   } catch (error) {
     debugLog("Verify registration OTP error:", error.message);
