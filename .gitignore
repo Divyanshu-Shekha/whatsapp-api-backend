@@ -29,4 +29,8 @@ Thumbs.db
 
 # Build files
 dist/
-build/
+build/.wwebjs_auth/
+.wwebjs_cache/
+*.deb
+*.deb.*
+server.js.bak*

@@ -491,6 +491,7 @@ function getPuppeteerConfig() {
     headless: true,
     args: [
       "--no-sandbox",
+      "--disable-ipv6",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-accelerated-2d-canvas",
@@ -3078,7 +3079,10 @@ app.post("/api/send-message", verifyAnyToken, async (req, res) => {
 
     debugLog(`📤 Sending message to ${chatId} (User: ${req.userId})`);
     const sentMessage = await client.sendMessage(chatId, message);
-    debugLog(`✓ Message sent successfully: ${sentMessage.id.id}`);
+    const sentMessageId = sentMessage?.id?._serialized || sentMessage?.id?.id || sentMessage?._data?.id?._serialized || `local_${Date.now()}_${Math.random().toString(36).slice(2,10)}`;
+    const sentTimestamp = sentMessage?.timestamp || Math.floor(Date.now() / 1000);
+    debugLog(`✓ Message sent successfully: ${sentMessageId || "(id unavailable)"}`);
+    if (!sentMessageId) { debugLog("⚠️ sentMessage.id missing - WhatsApp Web response shape may have changed:", JSON.stringify(sentMessage)); }
 
     let contactName = number;
     try {
@@ -3096,7 +3100,7 @@ app.post("/api/send-message", verifyAnyToken, async (req, res) => {
         "/messages/save",
         "POST",
         {
-          message_id: sentMessage.id.id,
+          message_id: sentMessageId,
           type: "sent",
           from_number: myInfo.wid.user,
           from_name: myInfo.pushname,
@@ -3105,7 +3109,7 @@ app.post("/api/send-message", verifyAnyToken, async (req, res) => {
           message_body: message,
           has_media: false,
           status: "sent",
-          timestamp: sentMessage.timestamp,
+          timestamp: sentTimestamp,
         },
         req.token,
       );
@@ -3133,7 +3137,7 @@ app.post("/api/send-message", verifyAnyToken, async (req, res) => {
     res.json({
       success: true,
       message: "Message sent successfully",
-      messageId: sentMessage.id.id,
+      messageId: sentMessageId,
       deviceId: actualDeviceId,
     });
   } catch (error) {
@@ -3263,7 +3267,10 @@ app.post(
         `Sending media to ${chatId} from device ${selectedDevice?.device_name || actualDeviceId}`,
       );
       const sentMessage = await client.sendMessage(chatId, media, { caption });
-      debugLog(`Media sent successfully: ${sentMessage.id.id}`);
+      const sentMessageId = sentMessage?.id?._serialized || sentMessage?.id?.id || sentMessage?._data?.id?._serialized || `local_${Date.now()}_${Math.random().toString(36).slice(2,10)}`;
+      const sentTimestamp = sentMessage?.timestamp || Math.floor(Date.now() / 1000);
+      debugLog(`Media sent successfully: ${sentMessageId || "(id unavailable)"}`);
+      if (!sentMessageId) { debugLog("⚠️ sentMessage.id missing on media send:", JSON.stringify(sentMessage)); }
 
       let contactName = number;
       try {
@@ -3280,7 +3287,7 @@ app.post(
         "/messages/save",
         "POST",
         {
-          message_id: sentMessage.id.id,
+          message_id: sentMessageId,
           type: "sent",
           from_number: myInfo.wid.user,
           from_name: myInfo.pushname,
@@ -3291,7 +3298,7 @@ app.post(
           media_type: mediaType,
           media_url: `/uploads/${req.file.filename}`,
           status: "sent",
-          timestamp: sentMessage.timestamp,
+          timestamp: sentTimestamp,
           device_id: actualDeviceId,
         },
         authToken,
@@ -3325,12 +3332,12 @@ app.post(
             selectedDevice.webhook_url,
             {
               event: "media_sent",
-              message_id: sentMessage.id.id,
+              message_id: sentMessageId,
               from: myInfo.wid.user,
               to: number,
               caption: caption,
               media_type: mediaType,
-              timestamp: sentMessage.timestamp,
+              timestamp: sentTimestamp,
               device_id: actualDeviceId,
               device_name: selectedDevice.device_name,
             },
@@ -3345,7 +3352,7 @@ app.post(
       res.json({
         success: true,
         message: "Media sent successfully",
-        messageId: sentMessage.id.id,
+        messageId: sentMessageId,
         dbId: savedMessage.id,
         deviceId: actualDeviceId,
         deviceName: selectedDevice?.device_name || "Unknown",
