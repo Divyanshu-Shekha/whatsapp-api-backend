@@ -581,10 +581,13 @@ async function initializeClientForUser(userId, token, forceNew = false) {
           clientId: `user-${userId}`,
         }),
         puppeteer: getPuppeteerConfig(),
-        webVersion: '2.3000.1035211615',
-        webVersionCache: {
-          type: 'remote',
-          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1035211615-alpha.html',
+        // webVersion: '2.3000.1035211615',
+        // webVersionCache: {
+        //   type: 'remote',
+        //   remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1035211615-alpha.html',
+        // },
+         webVersionCache: {
+          type: 'local',
         },
       });
 
@@ -801,10 +804,13 @@ async function initializeClientForDevice(
           clientId: `device-${deviceId}`,
         }),
         puppeteer: getPuppeteerConfig(),
-        webVersion: '2.3000.1035211615',
-        webVersionCache: {
-          type: 'remote',
-          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1035211615-alpha.html',
+        // webVersion: '2.3000.1035211615',
+        // webVersionCache: {
+        //   type: 'remote',
+        //   remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1035211615-alpha.html',
+        // },
+         webVersionCache: {
+          type: 'local',
         },
       });
 
